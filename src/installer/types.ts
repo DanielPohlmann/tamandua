@@ -1,4 +1,4 @@
-export type HarnessType = "pi" | "hermes";
+export type HarnessType = "pi" | "hermes" | "claude";
 
 export type WorkflowAgentFiles = {
   baseDir: string;

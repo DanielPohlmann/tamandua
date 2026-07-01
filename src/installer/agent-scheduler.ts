@@ -869,8 +869,8 @@ export function extractTokenUsage(usageLike: unknown): number | null {
   const parts: Array<number | null> = [
     firstNumeric(usage, ["input", "inputTokens", "input_tokens", "prompt_tokens"]),
     firstNumeric(usage, ["output", "outputTokens", "output_tokens", "completion_tokens"]),
-    firstNumeric(usage, ["cacheRead", "cache_read", "cache_read_tokens"]),
-    firstNumeric(usage, ["cacheWrite", "cache_write", "cache_write_tokens"]),
+    firstNumeric(usage, ["cacheRead", "cache_read", "cache_read_tokens", "cache_read_input_tokens"]),
+    firstNumeric(usage, ["cacheWrite", "cache_write", "cache_write_tokens", "cache_creation_input_tokens"]),
   ];
 
   if (!parts.some((value) => value !== null)) return null;
