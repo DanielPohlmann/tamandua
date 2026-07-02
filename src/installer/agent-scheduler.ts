@@ -943,6 +943,32 @@ export function parsePollingRoundMetadata(output: string): PollingRoundMetadata 
     };
   }
 
+  // Claude Code (`--output-format json`) emits a single JSON result object,
+  // not the pi JSONL event stream. Detect and handle it first.
+  try {
+    const whole = asRecord(JSON.parse(normalized));
+    if (
+      whole &&
+      (whole.type === "result" ||
+        (typeof whole.result === "string" && asRecord(whole.usage)))
+    ) {
+      const resultText =
+        typeof whole.result === "string" ? whole.result.trim() : "";
+      const assistantOutput = resultText.length > 0 ? resultText : normalized;
+      const tokenUsage = extractTokenUsage(whole.usage);
+      const hints = extractIdentifierHints(`${assistantOutput}\n${normalized}`);
+      return {
+        assistantOutput,
+        tokenUsage,
+        runId: hints.runId,
+        stepId: hints.stepId,
+        jsonMetadataDetected: true,
+      };
+    }
+  } catch {
+    // Not a single JSON object — fall through to pi JSONL / text handling.
+  }
+
   const lines = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const events: Record<string, unknown>[] = [];
 
