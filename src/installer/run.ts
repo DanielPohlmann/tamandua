@@ -95,7 +95,7 @@ export async function runWorkflow(
     ...context,
     workspace_mode: workspaceMode,
     no_hurry_save_tokens_mode: String(noHurrySaveTokensMode ?? false),
-    harness_type: harnessType ?? "pi",
+    harness_type: harnessType ?? "claude",
     no_relaunch_upon_rugpull: String(noRelaunchUponRugpull ?? false),
   };
 

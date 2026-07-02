@@ -70,7 +70,7 @@ describe("HarnessType flow (US-001)", () => {
   });
 
   describe("RunWorkflowParams.harnessType", () => {
-    it("is optional and defaults to 'pi' in run context", async () => {
+    it("is optional and defaults to 'claude' in run context", async () => {
       const workflowId = "test-harness-default";
       writeMinimalWorkflow(tempHome, workflowId, "direct");
 
@@ -92,7 +92,7 @@ describe("HarnessType flow (US-001)", () => {
         .all(workflowId) as { context: string }[];
       assert.ok(rows.length > 0, "run record should exist");
       const ctx = JSON.parse(rows[0].context);
-      assert.equal(ctx.harness_type, "pi", "default harness_type is 'pi'");
+      assert.equal(ctx.harness_type, "claude", "default harness_type is 'claude'");
     });
 
     it("stores 'hermes' when harnessType is 'hermes'", async () => {
@@ -173,9 +173,9 @@ describe("HarnessType flow (US-001)", () => {
       assert.equal(result, "pi");
     });
 
-    it("returns 'pi' for a non-existent run", () => {
+    it("returns 'claude' for a non-existent run", () => {
       const result = getRunHarnessType("non-existent-run-id");
-      assert.equal(result, "pi");
+      assert.equal(result, "claude");
     });
   });
 
