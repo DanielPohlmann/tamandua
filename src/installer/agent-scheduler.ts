@@ -1531,7 +1531,7 @@ export function buildPollingRoundContext(
     workdir: workingDirectoryForHarness,
     workingDirectoryForHarness,
     model,
-    harnessType: job.harnessType ?? "pi",
+    harnessType: job.harnessType ?? "claude",
   };
 }
 
@@ -1645,7 +1645,7 @@ export async function executePollingRound(
       agentPersonaInstructions,
     );
 
-    const harnessType = job.harnessType ?? "pi";
+    const harnessType = job.harnessType ?? "claude";
 
     logger.info("Polling round start", context);
 
@@ -1654,7 +1654,24 @@ export async function executePollingRound(
     };
 
     let output: string;
-    if (harnessType === "hermes") {
+    if (harnessType === "claude") {
+      const claudePath = findClaudeBinary();
+      const claudeModel =
+        typeof context.model === "string" && context.model
+          ? context.model
+          : undefined;
+      output = await runClaude(pollingPrompt, {
+        timeout,
+        workdir: workingDirectoryForHarness,
+        model: claudeModel,
+        env: {
+          TAMANDUA_WORKER_JOB_ID: job.id,
+          TAMANDUA_WORKER_PID: String(process.pid),
+          TAMANDUA_CLAUDE_BINARY: claudePath,
+        },
+        onSpawn,
+      });
+    } else if (harnessType === "hermes") {
       const hermesPath = findHermesBinary();
       output = await runHermes(pollingPrompt, {
         timeout,
@@ -1810,8 +1827,8 @@ export async function createAgentCronJob(
 
   const fullAgentId = agent.id.startsWith(`${workflowId}_`) ? agent.id : `${workflowId}_${agent.id}`;
 
-  // Read harness_type from run context; default to "pi" if not set.
-  let harnessType: HarnessType = "pi";
+  // Read harness_type from run context; default to "claude" if not set.
+  let harnessType: HarnessType = "claude";
   try {
     const { getDb } = await import("../db.js");
     const db = getDb();
@@ -1820,10 +1837,12 @@ export async function createAgentCronJob(
       const ctx = JSON.parse(runRow.context) as Record<string, unknown>;
       if (ctx.harness_type === "hermes") {
         harnessType = "hermes";
+      } else if (ctx.harness_type === "pi") {
+        harnessType = "pi";
       }
     }
   } catch {
-    // If we can't read the context, default to "pi"
+    // If we can't read the context, default to "claude"
   }
 
   const jobInfo: CronJobInfo = {
