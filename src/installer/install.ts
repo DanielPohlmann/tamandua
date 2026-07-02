@@ -6,6 +6,7 @@ import { provisionAgents } from "./agent-provision.js";
 import { readPiConfig, type PiConfig } from "./pi-config.js";
 import { resolvePiStateDir } from "./paths.js";
 import type { AgentRole, WorkflowInstallResult } from "./types.js";
+import { logger } from "../lib/logger.js";
 
 // ── Agent list management (Tamandua stores agents at ~/.tamandua/agents.json) ──
 
@@ -239,8 +240,15 @@ export async function installWorkflow(params: {
     roleMap.set(agent.id, agent.role ?? inferRole(agent.id));
   }
 
-  // Read pi config for reference (we don't modify pi's config, just read it)
-  await readPiConfig();
+  // Read pi config for reference only (never modified). Absent on claude-only
+  // hosts — treat as best-effort so install does not require pi to be present.
+  try {
+    await readPiConfig();
+  } catch (err) {
+    logger.debug("pi config not found; continuing (claude-only host is fine)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Load and update the tamandua agents list
   const list = await readAgentsList();
