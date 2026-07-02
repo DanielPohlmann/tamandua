@@ -5,7 +5,7 @@ export interface WorkflowRunArgs {
   worktreeOriginRef?: string;
   noHurrySaveTokensMode?: boolean;
   noRelaunchUponRugpull?: boolean;
-  harnessAs?: "pi" | "hermes";
+  harnessAs?: "pi" | "hermes" | "claude";
 }
 
 export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
@@ -15,7 +15,7 @@ export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
   let worktreeOriginRef: string | undefined;
   let noHurrySaveTokensMode: boolean | undefined;
   let noRelaunchUponRugpull: boolean | undefined;
-  let harnessAs: "pi" | "hermes" | undefined;
+  let harnessAs: "pi" | "hermes" | "claude" | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
@@ -30,10 +30,20 @@ export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
       continue;
     }
 
+    if (token === "--claude-as-harness") {
+      if (harnessAs !== undefined) {
+        throw new Error(
+          "Cannot specify more than one harness. Choose one of --claude-as-harness, --pi-as-harness, or --hermes-as-harness.",
+        );
+      }
+      harnessAs = "claude";
+      continue;
+    }
+
     if (token === "--pi-as-harness") {
       if (harnessAs !== undefined) {
         throw new Error(
-          "Cannot specify both --pi-as-harness and --hermes-as-harness. Choose one harness.",
+          "Cannot specify more than one harness. Choose one of --claude-as-harness, --pi-as-harness, or --hermes-as-harness.",
         );
       }
       harnessAs = "pi";
@@ -43,7 +53,7 @@ export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
     if (token === "--hermes-as-harness") {
       if (harnessAs !== undefined) {
         throw new Error(
-          "Cannot specify both --pi-as-harness and --hermes-as-harness. Choose one harness.",
+          "Cannot specify more than one harness. Choose one of --claude-as-harness, --pi-as-harness, or --hermes-as-harness.",
         );
       }
       harnessAs = "hermes";

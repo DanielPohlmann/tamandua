@@ -1029,12 +1029,15 @@ Options:
   --worktree-origin-ref <ref>
       Git ref (branch, tag, or SHA) to check out in the worktree.
       Defaults to the current branch.
+  --claude-as-harness
+      Use the Claude Code CLI (claude -p) as the agent harness.
+      This is the default. Mutually exclusive with the other harness flags.
   --pi-as-harness
-      Use pi as the agent harness (this is the default).
-      Mutually exclusive with --hermes-as-harness.
+      Use pi as the agent harness instead of claude.
+      Mutually exclusive with the other harness flags.
   --hermes-as-harness
-      Use hermes as the agent harness instead of pi.
-      Mutually exclusive with --pi-as-harness.
+      Use hermes as the agent harness instead of claude.
+      Mutually exclusive with the other harness flags.
   --no-relaunch-upon-rugpull
       Disable automatic replacement-run after a rugpull (base branch move)
       is detected on a failed merge/merge-worktree run.
@@ -1532,7 +1535,7 @@ function getUsageText(): string {
     "                                      [--working-directory-for-harness <dir>]",
     "                                      [--worktree-origin-repository <dir>]",
     "                                      [--worktree-origin-ref <ref>]",
-    "                                      [--pi-as-harness | --hermes-as-harness]",
+    "                                      [--claude-as-harness | --pi-as-harness | --hermes-as-harness]",
     "                                      [--no-relaunch-upon-rugpull]",
     "                                      Start a workflow run",
     "", "tamandua worktree list                List managed worktrees",
