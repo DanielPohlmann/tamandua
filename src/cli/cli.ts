@@ -58,7 +58,7 @@ import {
   type RunLoopIterationOptions,
   type RunLoopIterationResult,
 } from "../autoresearch/autoresearch.js";
-import { getDb, upsertAutoresearchSession } from "../db.js";
+import { getDb, upsertAutoresearchSession, deleteDbFiles } from "../db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -454,6 +454,38 @@ Examples:
   tamandua uninstall --force  # Force uninstall despite active runs
   tamandua workflow uninstall <name>  # Uninstall a single workflow by name
   tamandua workflow uninstall --all   # Uninstall all workflows only (no service stops)`;
+}
+
+function getResetHelp(): string {
+  return `tamandua reset — Factory reset: remove everything and clear the database
+
+Usage: tamandua reset [--force]
+
+tamandua reset is a full teardown that returns Tamandua to its post-clone
+state. Unlike uninstall, it also stops the control plane and DELETES the
+database — wiping all dashboard history (runs, steps, stories, events,
+token stats).
+
+In order, it does this:
+
+  1. Checks for active runs with status running or paused.
+  2. If active runs exist and --force is not set, lists them and exits
+     with code 1.
+  3. Stops the dashboard daemon, the MCP server, and the control plane
+     (each only if running).
+  4. Uninstalls every workflow: removes workflow directories, agent
+     workspaces, agent entries from ~/.tamandua/agents.json, and cron
+     jobs. Stops and removes any managed git worktrees.
+  5. Deletes the SQLite database and its WAL/SHM sidecars
+     (~/.tamandua/tamandua.db*). A fresh empty database is recreated on
+     the next command.
+
+Options:
+  --force    Skip the active-runs check and reset anyway.
+
+Examples:
+  tamandua reset          # Full factory reset (refuses if active runs exist)
+  tamandua reset --force  # Force reset despite active runs`;
 }
 
 function getStatusHelp(): string {
@@ -1029,12 +1061,15 @@ Options:
   --worktree-origin-ref <ref>
       Git ref (branch, tag, or SHA) to check out in the worktree.
       Defaults to the current branch.
+  --claude-as-harness
+      Use the Claude Code CLI (claude -p) as the agent harness.
+      This is the default. Mutually exclusive with the other harness flags.
   --pi-as-harness
-      Use pi as the agent harness (this is the default).
-      Mutually exclusive with --hermes-as-harness.
+      Use pi as the agent harness instead of claude.
+      Mutually exclusive with the other harness flags.
   --hermes-as-harness
-      Use hermes as the agent harness instead of pi.
-      Mutually exclusive with --pi-as-harness.
+      Use hermes as the agent harness instead of claude.
+      Mutually exclusive with the other harness flags.
   --no-relaunch-upon-rugpull
       Disable automatic replacement-run after a rugpull (base branch move)
       is detected on a failed merge/merge-worktree run.
@@ -1524,7 +1559,8 @@ function getUsageText(): string {
     "Run tamandua <command> --help for detailed command help.",
     "",
     "tamandua get-ready                    Install bundled workflows and start dashboard/control plane",
-    "tamandua uninstall [--force]          Full uninstall",
+    "tamandua uninstall [--force]          Full uninstall (keeps the database)",
+    "tamandua reset [--force]              Factory reset: uninstall everything AND clear the database",
     "tamandua status                       Show detailed system status (services, paths, runs, processes)",
     "", "tamandua workflow list                List available workflows",
     "tamandua workflow install <name|--all>  Install a workflow (or all)",
@@ -1532,7 +1568,7 @@ function getUsageText(): string {
     "                                      [--working-directory-for-harness <dir>]",
     "                                      [--worktree-origin-repository <dir>]",
     "                                      [--worktree-origin-ref <ref>]",
-    "                                      [--pi-as-harness | --hermes-as-harness]",
+    "                                      [--claude-as-harness | --pi-as-harness | --hermes-as-harness]",
     "                                      [--no-relaunch-upon-rugpull]",
     "                                      Start a workflow run",
     "", "tamandua worktree list                List managed worktrees",
@@ -1622,6 +1658,9 @@ async function main() {
     }
     if (group === "uninstall") {
       printHelp(getUninstallHelp());
+    }
+    if (group === "reset") {
+      printHelp(getResetHelp());
     }
     if (group === "status") {
       printHelp(getStatusHelp());
@@ -1749,6 +1788,26 @@ async function main() {
     if (isMcpRunning().running) { stopMcp(); console.log("MCP server stopped."); }
     await uninstallAllWorkflows();
     console.log("Tamandua fully uninstalled."); return;
+  }
+
+  if (group === "reset" && (!args[1] || args[1] === "--force")) {
+    const force = args.includes("--force");
+    const activeRuns = await checkActiveRuns();
+    if (activeRuns.length > 0 && !force) {
+      process.stderr.write(`Cannot reset: ${activeRuns.length} active run(s):\n`);
+      for (const run of activeRuns) process.stderr.write(`  - ${run.id}: ${run.task}\n`);
+      process.stderr.write(`\nUse --force to reset anyway.\n`); process.exit(1);
+    }
+    if (isRunning().running) { stopDaemon(); console.log("Dashboard stopped."); }
+    if (isMcpRunning().running) { stopMcp(); console.log("MCP server stopped."); }
+    if (isControlPlaneRunning().running) { stopControlPlane(); console.log("Control plane stopped."); }
+    await uninstallAllWorkflows();
+    console.log("All workflows uninstalled.");
+    const removed = deleteDbFiles();
+    console.log(removed.length > 0
+      ? `Database cleared (${removed.length} file(s) removed).`
+      : "Database already clean.");
+    console.log("Tamandua reset complete. A fresh database will be created on the next command."); return;
   }
 
   if (group === "get-ready" && !args[1]) {

@@ -21,14 +21,18 @@ describe("README Hermes harness documentation", () => {
     );
   });
 
-  it("states pi is the default and recommended harness", () => {
+  it("states claude is the default harness", () => {
     assert.ok(
       readmeContent.includes("This is the default"),
-      "README must state that --pi-as-harness is the default"
+      "README must state which harness is the default"
     );
     assert.ok(
-      readmeContent.match(/Use pi.*for production/),
-      "README must recommend pi for production workflows"
+      readmeContent.includes("--claude-as-harness"),
+      "README must document --claude-as-harness"
+    );
+    assert.ok(
+      readmeContent.match(/claude.*default|default.*claude/i),
+      "README must state claude is the default harness"
     );
   });
 
@@ -85,9 +89,9 @@ describe("README Hermes harness documentation", () => {
 
   it("workflow run command row includes harness flags", () => {
     assert.ok(
-      readmeContent.includes("[--pi-as-harness \\| --hermes-as-harness]") ||
-      readmeContent.includes("[--pi-as-harness | --hermes-as-harness]"),
-      "README workflow run command row must show harness flags"
+      readmeContent.includes("[--claude-as-harness \\| --pi-as-harness \\| --hermes-as-harness]") ||
+      readmeContent.includes("[--claude-as-harness | --pi-as-harness | --hermes-as-harness]"),
+      "README workflow run command row must show all three harness flags"
     );
   });
 

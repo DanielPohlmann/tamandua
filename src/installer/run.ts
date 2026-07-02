@@ -32,7 +32,7 @@ export interface RunWorkflowParams {
   worktreeOriginRef?: string;
   /** When true, reduces polling frequency to save tokens (15-min floor, 15-min default) */
   noHurrySaveTokensMode?: boolean;
-  /** Harness binary to use for agent invocations (default "pi") */
+  /** Harness binary to use for agent invocations (default "claude") */
   harnessType?: HarnessType;
   /** When true, suppresses automatic replacement-run launch after a rugpull is detected */
   noRelaunchUponRugpull?: boolean;
@@ -95,7 +95,7 @@ export async function runWorkflow(
     ...context,
     workspace_mode: workspaceMode,
     no_hurry_save_tokens_mode: String(noHurrySaveTokensMode ?? false),
-    harness_type: harnessType ?? "pi",
+    harness_type: harnessType ?? "claude",
     no_relaunch_upon_rugpull: String(noRelaunchUponRugpull ?? false),
   };
 

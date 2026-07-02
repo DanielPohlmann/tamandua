@@ -74,7 +74,7 @@ describe("buildPollingRoundContext harnessType", () => {
     assert.equal(context.harnessType, "hermes");
   });
 
-  it("defaults harnessType to 'pi' when not set on job", () => {
+  it("defaults harnessType to 'claude' when not set on job", () => {
     const job: CronJobInfo = {
       id: "test-job",
       workflowId: "wf-1",
@@ -90,7 +90,7 @@ describe("buildPollingRoundContext harnessType", () => {
       job, agent, 60, "/tmp/work", undefined,
     );
 
-    assert.equal(context.harnessType, "pi");
+    assert.equal(context.harnessType, "claude");
   });
 
   it("includes harnessType 'pi' when explicitly set", () => {
@@ -117,11 +117,13 @@ describe("executePollingRound harness dispatch", () => {
   let tempHome: string;
   let savedPiBinary: string | undefined;
   let savedHermesBinary: string | undefined;
+  let savedClaudeBinary: string | undefined;
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "tamandua-test-routing-"));
     savedPiBinary = process.env.TAMANDUA_PI_BINARY;
     savedHermesBinary = process.env.TAMANDUA_HERMES_BINARY;
+    savedClaudeBinary = process.env.TAMANDUA_CLAUDE_BINARY;
 
     const homeDir = path.join(tempHome, "home");
     const stateDir = path.join(homeDir, ".tamandua");
@@ -136,6 +138,12 @@ describe("executePollingRound harness dispatch", () => {
     const piLog = path.join(tempHome, "pi-args.log");
     makeMockBinary(piPath, `echo "$@" >> "${piLog}"; echo "HEARTBEAT_OK"`);
     process.env.TAMANDUA_PI_BINARY = piPath;
+
+    // Create mock claude binary
+    const claudePath = path.join(tempHome, "claude-mock");
+    const claudeLog = path.join(tempHome, "claude-args.log");
+    makeMockBinary(claudePath, `echo "$@" >> "${claudeLog}"; printf '{"type":"result","result":"HEARTBEAT_OK","usage":{"input_tokens":1,"output_tokens":1}}'`);
+    process.env.TAMANDUA_CLAUDE_BINARY = claudePath;
   });
 
   afterEach(() => {
@@ -143,6 +151,8 @@ describe("executePollingRound harness dispatch", () => {
     else process.env.TAMANDUA_PI_BINARY = savedPiBinary;
     if (savedHermesBinary === undefined) delete process.env.TAMANDUA_HERMES_BINARY;
     else process.env.TAMANDUA_HERMES_BINARY = savedHermesBinary;
+    if (savedClaudeBinary === undefined) delete process.env.TAMANDUA_CLAUDE_BINARY;
+    else process.env.TAMANDUA_CLAUDE_BINARY = savedClaudeBinary;
     shutdownAllCrons();
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
@@ -230,7 +240,7 @@ describe("executePollingRound harness dispatch", () => {
     await removeRunCrons(runId);
   });
 
-  it("dispatches to runPi when harnessType is missing (defaults to pi)", async () => {
+  it("dispatches to runClaude when harnessType is missing (defaults to claude)", async () => {
     const workdir = path.join(tempHome, "work");
     fs.mkdirSync(workdir, { recursive: true });
 
@@ -252,19 +262,52 @@ describe("executePollingRound harness dispatch", () => {
       workflow,
       workingDirectoryForHarness: workdir,
     });
-
     assert.ok(result.ok);
 
-    const piLog = path.join(tempHome, "pi-args.log");
+    const claudeLog = path.join(tempHome, "claude-args.log");
     await executePollingRound(
       { id: result.id!, workflowId: "test-wf", runId, agentId: "test-wf_test-agent", intervalMinutes: 5, harnessType: undefined, workingDirectoryForHarness: workdir, createdAt: "" },
       makeAgent(),
       workflow,
     );
 
-    // Verify pi was invoked (not hermes)
-    const piArgs = fs.readFileSync(piLog, "utf-8");
-    assert.ok(piArgs.includes("--print"), "pi should be invoked by default");
+    const claudeArgs = fs.readFileSync(claudeLog, "utf-8");
+    assert.ok(claudeArgs.includes("--output-format json"), "claude should be invoked by default");
+
+    await removeRunCrons(runId);
+  });
+
+  it("dispatches to runClaude when harnessType is 'claude'", async () => {
+    const workdir = path.join(tempHome, "work");
+    fs.mkdirSync(workdir, { recursive: true });
+
+    const runId = "run-claude-dispatch";
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.prepare(
+      "INSERT INTO runs (id, workflow_id, task, status, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(runId, "test-wf", "test task", "running", JSON.stringify({
+      harness_type: "claude",
+      working_directory_for_harness: workdir,
+    }), now, now);
+
+    const workflow = makeWorkflow();
+    const result = await createAgentCronJob({
+      workflowId: "test-wf",
+      runId,
+      agent: makeAgent(),
+      workflow,
+      workingDirectoryForHarness: workdir,
+    });
+    assert.ok(result.ok);
+
+    const claudeLog = path.join(tempHome, "claude-args.log");
+    const job = { id: result.id!, workflowId: "test-wf", runId, agentId: "test-wf_test-agent", intervalMinutes: 5, harnessType: "claude" as const, workingDirectoryForHarness: workdir, createdAt: "" };
+    await executePollingRound(job, makeAgent(), workflow);
+
+    const claudeArgs = fs.readFileSync(claudeLog, "utf-8");
+    assert.ok(claudeArgs.includes("-p"), "claude should be invoked with -p");
+    assert.ok(claudeArgs.includes("--dangerously-skip-permissions"), "claude should skip permissions");
 
     await removeRunCrons(runId);
   });

@@ -10,7 +10,7 @@
   <a href="https://igorhvr.github.io/tamandua/"><img src="https://img.shields.io/badge/website-tamandua-1f6feb.svg" alt="Website"></a>
 </p>
 
-Build your agent team in [pi](https://github.com/mariozechner/pi-coding-agent) with one command.
+Build your agent team on the [Claude Code CLI](https://code.claude.com) with one command.
 
 You don't need to hire a dev team. You need to define one. Tamandua gives you a team of specialized AI agents — planner, developer, verifier, tester, reviewer — that work together in reliable, repeatable workflows. One install. Zero infrastructure.
 
@@ -27,6 +27,7 @@ You don't need to hire a dev team. You need to define one. Tamandua gives you a 
 - [Security](#security)
 - [Commands](#commands)
 - [Requirements](#requirements)
+- [Development](#development)
 - [License](#license) · [Origins](#origins)
 
 ### Install from GitHub
@@ -244,7 +245,7 @@ flowchart LR
     CLI["tamandua CLI<br/>workflow run"] -->|create run| DB[("SQLite<br/>~/.tamandua/tamandua.db")]
     CLI -->|register run| Daemon["Background daemon<br/>control plane"]
     Daemon -->|schedules polling| Agents["Agent team<br/>planner · developer · verifier · tester"]
-    Agents -->|"pi --print"| Harness["pi harness<br/>(or Hermes, alpha)"]
+    Agents -->|"claude -p"| Harness["claude harness<br/>(or pi / Hermes)"]
     Agents -->|claim step / write results| DB
     DB --> Dashboard["Dashboard :3334<br/>Kanban + AutoResearch panels"]
     DB --> MCP["Remote MCP :3338<br/>14 tools"]
@@ -252,7 +253,7 @@ flowchart LR
 
 ### Minimal by design
 
-YAML + SQLite + polling. That's it. No Redis, no Kafka, no container orchestrator. Tamandua is a TypeScript CLI with zero external dependencies. It runs wherever pi runs.
+YAML + SQLite + polling. That's it. No Redis, no Kafka, no container orchestrator. Tamandua is a TypeScript CLI with zero external dependencies. It runs wherever the Claude Code CLI runs (or pi / Hermes).
 
 ---
 
@@ -483,13 +484,14 @@ You're installing agent teams that run code on your machine. We take that seriou
 | `tamandua source-path` | Print the Tamandua source checkout path |
 | `tamandua skill-path` | Print the path to the bundled tamandua-agents agent skill |
 | `tamandua update [--force]` | Pull the source checkout, rebuild, reinstall workflows, and restart previously running services |
-| `tamandua uninstall [--force]` | Full teardown (agents, crons, DB) |
+| `tamandua uninstall [--force]` | Full teardown of workflows, agent workspaces, agent registrations, and crons (stops dashboard/MCP). Keeps the database. |
+| `tamandua reset [--force]` | Factory reset: everything `uninstall` does, plus stops the control plane and **deletes the database** (`~/.tamandua/tamandua.db*`), wiping all dashboard history. Refuses if active runs exist unless `--force`. |
 
 ### Workflows
 
 | Command | Description |
 |---------|-------------|
-| `tamandua workflow run <id> <task> [--working-directory-for-harness <dir>] [--pi-as-harness \| --hermes-as-harness]` | Start a run (defaults harness CWD to your current directory) |
+| `tamandua workflow run <id> <task> [--working-directory-for-harness <dir>] [--claude-as-harness \| --pi-as-harness \| --hermes-as-harness]` | Start a run (defaults harness CWD to your current directory) |
 | `tamandua workflow status <query>` | Check run status |
 | `tamandua workflow runs` | List all runs |
 | `tamandua workflow resume <run-id>` | Resume a failed run |
@@ -529,22 +531,29 @@ JSON endpoint is also useful for external integrations — see
 
 ### Harness Selection
 
-By default, Tamandua uses **pi** (`pi --print`) as its agent harness. You can
-override this with the harness selection flags on `tamandua workflow run`:
+By default, Tamandua uses the **Claude Code CLI** (`claude -p`) as its agent
+harness. You can override this with the harness selection flags on
+`tamandua workflow run`:
 
 | Flag | Description |
 |------|-------------|
-| `--pi-as-harness` | Use pi as the agent harness. **This is the default.** |
-| `--hermes-as-harness` | Use [Hermes](https://github.com/nicholasgasior/hermes) as the agent harness instead of pi. |
+| `--claude-as-harness` | Use the Claude Code CLI (`claude -p`) as the agent harness. **This is the default.** |
+| `--pi-as-harness` | Use [pi](https://github.com/mariozechner/pi-coding-agent) as the agent harness instead of claude. |
+| `--hermes-as-harness` | Use [Hermes](https://github.com/nicholasgasior/hermes) as the agent harness instead of claude. |
 
-These flags are **mutually exclusive** — specifying both is an error.
+These flags are **mutually exclusive** — specifying more than one is an error.
+
+Tamandua discovers the `claude` binary on your `PATH`; set
+`TAMANDUA_CLAUDE_BINARY` to point at a specific binary. Harness binary
+validation runs at scheduling time — if the selected harness binary isn't
+found or isn't executable, the run fails immediately with a clear error.
 
 #### Hermes Support (Alpha)
 
 > **⚠️ Alpha quality.** Hermes harness support is in **alpha** and has known
 > limitations: it is **very slow** compared to pi, and **token accounting is
 > broken** (token usage numbers in runs and the dashboard will be inaccurate).
-> Use pi (`--pi-as-harness`) for production workflows.
+> Use pi (`--pi-as-harness`) for production workflows if not using claude.
 
 To use a custom Hermes binary path, set the `TAMANDUA_HERMES_BINARY`
 environment variable:
@@ -608,9 +617,56 @@ The remote MCP endpoint exposes 14 tools:
 ## Requirements
 
 - Node.js >= 22
-- [pi](https://github.com/mariozechner/pi-coding-agent) installed on the host
-  - Tamandua uses pi for AI agent execution. Agents run via `pi --print` in non-interactive mode.
+- [Claude Code CLI](https://code.claude.com) (`claude`) installed on the host
+  - Tamandua's default harness. Agents run via `claude -p` in non-interactive mode.
+  - Set `TAMANDUA_CLAUDE_BINARY` to override the discovered binary.
+- Optional: [pi](https://github.com/mariozechner/pi-coding-agent) — only needed when running with `--pi-as-harness`.
 - `gh` CLI for PR creation steps
+
+---
+
+## Development
+
+### Running the tests
+
+Tests import from the compiled output, so **build first**, then run:
+
+```bash
+npm run build
+npm test
+```
+
+> **Heads-up on platform-dependent failures.** The full suite is written and
+> validated on Linux/macOS. On Windows — and on any host that doesn't have
+> every harness installed (`pi`, `hermes`) — a large fraction of tests fail
+> for **environment reasons, not code bugs**: symlink creation, the
+> `bin/tamandua` wrapper spawn, POSIX-only path expectations (`/tmp` vs
+> `C:\tmp`), and missing harness binaries. On such machines a raw pass/fail
+> count is **not** a reliable regression signal.
+
+**How to judge a change on a machine with pre-existing failures:**
+
+1. Build and run only the affected test file, e.g.
+   `node --test src/db.test.ts`.
+2. Compare against the clean committed baseline for the same file — stash your
+   changes, rebuild, run, then restore:
+
+   ```bash
+   git stash push -- <changed files>
+   npm run build && node --test <affected test file>   # baseline counts
+   git stash pop
+   npm run build && node --test <affected test file>   # your counts
+   ```
+
+   **Zero *new* failures** (identical or better counts) means no regression,
+   even if the absolute count is non-zero.
+3. For CLI behaviour, prefer a manual smoke test in an isolated home so you
+   never touch live state:
+
+   ```bash
+   HOME="$(mktemp -d)" TAMANDUA_DB_PATH="$HOME/.tamandua/tamandua.db" \
+     node dist/cli/cli.js <command>
+   ```
 
 ---
 

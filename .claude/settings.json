@@ -1,0 +1,17 @@
+{
+  "hooks": {
+  },
+  "enabledPlugins": {
+    "skill-creator@claude-plugins-official": true,
+    "superpowers@superpowers-dev": true
+  },
+  "extraKnownMarketplaces": {
+    "superpowers-dev": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers"
+      },
+      "autoUpdate": true
+    }
+  }
+}

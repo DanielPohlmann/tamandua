@@ -179,6 +179,19 @@ describe("parseWorkflowRunArgs", () => {
     assert.equal(result.harnessAs, "pi");
   });
 
+  it("parses --claude-as-harness flag", () => {
+    const result = parseWorkflowRunArgs(["--claude-as-harness", "do the task"]);
+    assert.equal(result.harnessAs, "claude");
+    assert.equal(result.taskTitle, "do the task");
+  });
+
+  it("throws when --claude-as-harness combined with --pi-as-harness", () => {
+    assert.throws(
+      () => parseWorkflowRunArgs(["--claude-as-harness", "--pi-as-harness", "task"]),
+      /Cannot specify more than one harness/,
+    );
+  });
+
   it("parses --hermes-as-harness flag", () => {
     const result = parseWorkflowRunArgs(["--hermes-as-harness", "do the task"]);
     assert.equal(result.taskTitle, "do the task");
@@ -193,14 +206,14 @@ describe("parseWorkflowRunArgs", () => {
   it("throws when both --pi-as-harness and --hermes-as-harness specified", () => {
     assert.throws(
       () => parseWorkflowRunArgs(["--pi-as-harness", "--hermes-as-harness", "task"]),
-      /Cannot specify both --pi-as-harness and --hermes-as-harness/,
+      /Cannot specify more than one harness/,
     );
   });
 
   it("throws when both flags in reverse order", () => {
     assert.throws(
       () => parseWorkflowRunArgs(["--hermes-as-harness", "--pi-as-harness", "task"]),
-      /Cannot specify both --pi-as-harness and --hermes-as-harness/,
+      /Cannot specify more than one harness/,
     );
   });
 

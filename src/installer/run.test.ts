@@ -428,7 +428,7 @@ describe("runWorkflow", () => {
 
     // ── Harness type context tests ──
 
-    it("stores harness_type 'pi' by default when harnessType is not provided", async () => {
+    it("stores harness_type 'claude' by default when harnessType is not provided", async () => {
       const workflowId = "test-ctx-harness-default";
       writeMinimalWorkflow(tempHome, workflowId, "direct");
 
@@ -448,7 +448,7 @@ describe("runWorkflow", () => {
       ).all(workflowId) as { context: string }[];
       assert.ok(rows.length > 0, "run record should exist");
       const ctx = JSON.parse(rows[0].context);
-      assert.equal(ctx.harness_type, "pi");
+      assert.equal(ctx.harness_type, "claude");
     });
 
     it("stores harness_type 'hermes' when harnessType is explicitly 'hermes'", async () => {

@@ -4,7 +4,7 @@ import path from "node:path";
 import { validateRunWorktree } from "./worktree-manager.js";
 import type { HarnessType } from "./types.js";
 import { getDb } from "../db.js";
-import { findHermesBinary } from "./agent-scheduler.js";
+import { findHermesBinary, findClaudeBinary } from "./agent-scheduler.js";
 
 export const RUN_CONTEXT_WORKING_DIRECTORY_FOR_HARNESS_KEY = "working_directory_for_harness";
 
@@ -124,6 +124,17 @@ export function validateRunHarnessForScheduling(
     }
   }
 
+  if (harnessType === "claude") {
+    try {
+      findClaudeBinary();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Run ${runId} requests claude harness but claude is not available: ${message}`,
+      );
+    }
+  }
+
   const expectedBranch = readNonEmptyString(context, "branch");
   if (expectedBranch) {
     const actualBranch = readCurrentGitBranch(workingDirectoryForHarness);
@@ -138,18 +149,19 @@ export function validateRunHarnessForScheduling(
 }
 
 /**
- * Read the harness_type from a run's context. Defaults to "pi" if the run
+ * Read the harness_type from a run's context. Defaults to "claude" if the run
  * is not found or the context does not specify harness_type.
  */
 export function getRunHarnessType(runId: string): HarnessType {
   const db = getDb();
   const row = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string } | undefined;
-  if (!row) return "pi";
+  if (!row) return "claude";
   try {
     const ctx = JSON.parse(row.context) as Record<string, unknown>;
     if (ctx.harness_type === "hermes") return "hermes";
-    return "pi";
+    if (ctx.harness_type === "pi") return "pi";
+    return "claude";
   } catch {
-    return "pi";
+    return "claude";
   }
 }

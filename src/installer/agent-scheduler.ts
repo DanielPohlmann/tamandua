@@ -182,12 +182,45 @@ export function findHermesBinary(): string {
   );
 }
 
+// ── claude binary discovery ───────────────────────────────────────
+
+export function findClaudeBinary(): string {
+  const envClaude = process.env.TAMANDUA_CLAUDE_BINARY?.trim();
+  if (envClaude) {
+    try {
+      fs.accessSync(envClaude, fs.constants.X_OK);
+      return envClaude;
+    } catch {
+      throw new Error(
+        `TAMANDUA_CLAUDE_BINARY set but not executable: ${envClaude}`
+      );
+    }
+  }
+
+  const pathDirs = (process.env.PATH ?? "").split(path.delimiter);
+  for (const dir of pathDirs) {
+    const candidate = path.join(dir, "claude");
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // keep looking
+    }
+  }
+
+  throw new Error(
+    "claude binary not found in PATH. Install the Claude Code CLI (https://code.claude.com) or set TAMANDUA_CLAUDE_BINARY."
+  );
+}
+
 // ── Low-level pi execution ─────────────────────────────────────────
 
 export interface RunPiOptions {
   timeout?: number; // seconds, default 60
   workdir?: string;
   env?: Record<string, string>;
+  /** Optional model passed to `claude --model` (claude harness only). */
+  model?: string;
   /**
    * Optional callback invoked once the child process is spawned. Used by
    * `executePollingRound` to register the child + pgid in `inFlightChildren`
@@ -576,6 +609,176 @@ export async function runHermes(
   return filteredStdout;
 }
 
+// ── Claude Code execution ─────────────────────────────────────────
+
+export async function runClaude(
+  prompt: string,
+  options: RunPiOptions = {},
+): Promise<string> {
+  const timeoutMs = (options.timeout ?? 60) * 1000;
+  const claudePath = findClaudeBinary();
+
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env as Record<string, string | undefined>,
+    ...(options.env ?? {}),
+  };
+
+  const startedAt = Date.now();
+
+  // Single-shot, fully autonomous invocation:
+  // -p <prompt>                     print mode, prompt as positional arg
+  // --output-format json            single JSON result object (result + usage)
+  // --dangerously-skip-permissions  no interactive prompts (background agent)
+  // --model <m>                     only when a concrete model is requested
+  const args = [
+    "-p", prompt,
+    "--output-format", "json",
+    "--dangerously-skip-permissions",
+  ];
+  if (options.model && options.model !== "default") {
+    args.push("--model", options.model);
+  }
+
+  const preview = formatPiCommandPreview(claudePath, args);
+  logger.info("claude pre-launch", {
+    harness: "claude",
+    commandPreview: preview.commandPreview,
+    promptElided: preview.promptElided,
+    argCount: preview.argCount,
+    timeoutMs,
+    workdir: options.workdir,
+  });
+
+  const child = spawn(claudePath, args, {
+    cwd: options.workdir ?? process.cwd(),
+    env: childEnv,
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
+  });
+
+  const childPid = child.pid;
+  const pgid = childPid ?? 0;
+
+  if (childPid && options.onSpawn) {
+    try {
+      options.onSpawn({ pid: childPid, pgid });
+    } catch (err) {
+      logger.warn("claude onSpawn callback threw", { error: String(err) });
+    }
+  }
+
+  logger.info("claude launched", {
+    harness: "claude",
+    pid: childPid ?? null,
+    pgid,
+    timeoutMs,
+    workdir: options.workdir,
+  });
+
+  // Prompt is passed as an argument; close stdin immediately.
+  child.stdin?.end();
+
+  let stderrPieces: string[] = [];
+  let stderrBytes = 0;
+  const MAX_STDERR_BYTES = 10 * 1024 * 1024;
+  child.stderr?.on("data", (chunk: Buffer) => {
+    const str = chunk.toString("utf-8");
+    if (stderrBytes + Buffer.byteLength(str, "utf-8") <= MAX_STDERR_BYTES) {
+      stderrPieces.push(str);
+      stderrBytes += Buffer.byteLength(str, "utf-8");
+    }
+  });
+
+  let stdoutPieces: string[] = [];
+  let stdoutBytes = 0;
+  const MAX_STDOUT_BYTES = 10 * 1024 * 1024;
+  child.stdout?.on("data", (chunk: Buffer) => {
+    const str = chunk.toString("utf-8");
+    if (stdoutBytes + Buffer.byteLength(str, "utf-8") <= MAX_STDOUT_BYTES) {
+      stdoutPieces.push(str);
+      stdoutBytes += Buffer.byteLength(str, "utf-8");
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (pgid) {
+        safeKillPgid(pgid, "SIGTERM");
+        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+      } else {
+        try { child.kill("SIGKILL"); } catch { /* best effort */ }
+      }
+      reject(new Error(`claude timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (code === 0 || code === null) {
+        resolve();
+      } else {
+        const failureStderr = stderrPieces.join("");
+        const failureStderrMeta = buildStreamLogMetadata(failureStderr);
+        logger.error("claude execution failed", {
+          harness: "claude",
+          pid: childPid ?? null,
+          pgid,
+          exitCode: code,
+          signal,
+          durationMs: Date.now() - startedAt,
+          stderrBytes: failureStderrMeta.bytes,
+          stderrPreview: failureStderrMeta.preview,
+          stderrTruncated: failureStderrMeta.truncated,
+        });
+        const stderrSuffix = failureStderr ? `\nstderr: ${failureStderr}` : "";
+        reject(new Error(`claude failed: exited with code ${code}${signal ? ` (signal ${signal})` : ""}${stderrSuffix}`));
+      }
+    });
+  });
+
+  const durationMs = Date.now() - startedAt;
+  const rawStdout = stdoutPieces.join("").trim();
+  const stderrOut = stderrPieces.join("");
+  const stderrMeta = buildStreamLogMetadata(stderrOut);
+
+  if (stderrMeta.preview) {
+    logger.warn("claude stderr", {
+      harness: "claude",
+      pid: childPid ?? null,
+      stderrBytes: stderrMeta.bytes,
+      stderrPreview: stderrMeta.preview,
+      stderrTruncated: stderrMeta.truncated,
+    });
+  }
+
+  const stdoutMeta = buildStreamLogMetadata(rawStdout);
+  logger.info("claude completed", {
+    harness: "claude",
+    pid: childPid ?? null,
+    pgid,
+    durationMs,
+    exitCode: child.exitCode,
+    signal: child.signalCode,
+    stdoutBytes: stdoutMeta.bytes,
+    stdoutPreview: stdoutMeta.preview,
+    stdoutTruncated: stdoutMeta.truncated,
+    stderrBytes: stderrMeta.bytes,
+    hasStderr: stderrMeta.bytes > 0,
+  });
+
+  return rawStdout;
+}
+
 // ── Prompt builders ─────────────────────────────────────────────────
 
 async function readOptionalPersonaFile(
@@ -869,8 +1072,8 @@ export function extractTokenUsage(usageLike: unknown): number | null {
   const parts: Array<number | null> = [
     firstNumeric(usage, ["input", "inputTokens", "input_tokens", "prompt_tokens"]),
     firstNumeric(usage, ["output", "outputTokens", "output_tokens", "completion_tokens"]),
-    firstNumeric(usage, ["cacheRead", "cache_read", "cache_read_tokens"]),
-    firstNumeric(usage, ["cacheWrite", "cache_write", "cache_write_tokens"]),
+    firstNumeric(usage, ["cacheRead", "cache_read", "cache_read_tokens", "cache_read_input_tokens"]),
+    firstNumeric(usage, ["cacheWrite", "cache_write", "cache_write_tokens", "cache_creation_input_tokens"]),
   ];
 
   if (!parts.some((value) => value !== null)) return null;
@@ -941,6 +1144,32 @@ export function parsePollingRoundMetadata(output: string): PollingRoundMetadata 
       stepId: null,
       jsonMetadataDetected: false,
     };
+  }
+
+  // Claude Code (`--output-format json`) emits a single JSON result object,
+  // not the pi JSONL event stream. Detect and handle it first.
+  try {
+    const whole = asRecord(JSON.parse(normalized));
+    if (
+      whole &&
+      (whole.type === "result" ||
+        (typeof whole.result === "string" && asRecord(whole.usage)))
+    ) {
+      const resultText =
+        typeof whole.result === "string" ? whole.result.trim() : "";
+      const assistantOutput = resultText.length > 0 ? resultText : normalized;
+      const tokenUsage = extractTokenUsage(whole.usage);
+      const hints = extractIdentifierHints(`${assistantOutput}\n${normalized}`);
+      return {
+        assistantOutput,
+        tokenUsage,
+        runId: hints.runId,
+        stepId: hints.stepId,
+        jsonMetadataDetected: true,
+      };
+    }
+  } catch {
+    // Not a single JSON object — fall through to pi JSONL / text handling.
   }
 
   const lines = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -1302,7 +1531,7 @@ export function buildPollingRoundContext(
     workdir: workingDirectoryForHarness,
     workingDirectoryForHarness,
     model,
-    harnessType: job.harnessType ?? "pi",
+    harnessType: job.harnessType ?? "claude",
   };
 }
 
@@ -1416,7 +1645,7 @@ export async function executePollingRound(
       agentPersonaInstructions,
     );
 
-    const harnessType = job.harnessType ?? "pi";
+    const harnessType = job.harnessType ?? "claude";
 
     logger.info("Polling round start", context);
 
@@ -1425,7 +1654,24 @@ export async function executePollingRound(
     };
 
     let output: string;
-    if (harnessType === "hermes") {
+    if (harnessType === "claude") {
+      const claudePath = findClaudeBinary();
+      const claudeModel =
+        typeof context.model === "string" && context.model
+          ? context.model
+          : undefined;
+      output = await runClaude(pollingPrompt, {
+        timeout,
+        workdir: workingDirectoryForHarness,
+        model: claudeModel,
+        env: {
+          TAMANDUA_WORKER_JOB_ID: job.id,
+          TAMANDUA_WORKER_PID: String(process.pid),
+          TAMANDUA_CLAUDE_BINARY: claudePath,
+        },
+        onSpawn,
+      });
+    } else if (harnessType === "hermes") {
       const hermesPath = findHermesBinary();
       output = await runHermes(pollingPrompt, {
         timeout,
@@ -1581,8 +1827,8 @@ export async function createAgentCronJob(
 
   const fullAgentId = agent.id.startsWith(`${workflowId}_`) ? agent.id : `${workflowId}_${agent.id}`;
 
-  // Read harness_type from run context; default to "pi" if not set.
-  let harnessType: HarnessType = "pi";
+  // Read harness_type from run context; default to "claude" if not set.
+  let harnessType: HarnessType = "claude";
   try {
     const { getDb } = await import("../db.js");
     const db = getDb();
@@ -1591,10 +1837,12 @@ export async function createAgentCronJob(
       const ctx = JSON.parse(runRow.context) as Record<string, unknown>;
       if (ctx.harness_type === "hermes") {
         harnessType = "hermes";
+      } else if (ctx.harness_type === "pi") {
+        harnessType = "pi";
       }
     }
   } catch {
-    // If we can't read the context, default to "pi"
+    // If we can't read the context, default to "claude"
   }
 
   const jobInfo: CronJobInfo = {

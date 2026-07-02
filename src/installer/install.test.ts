@@ -191,6 +191,15 @@ describe("installWorkflow", () => {
     }
   });
 
+  it("installs a workflow when no ~/.pi config exists (claude-only host)", async () => {
+    // Remove the pi config created in beforeEach to simulate a claude-only host.
+    // installWorkflow must not throw due to a missing pi config.
+    fs.rmSync(path.join(tempHome, ".pi"), { recursive: true, force: true });
+    await assert.doesNotReject(async () => {
+      await installWorkflow({ workflowId: "bug-fix" });
+    });
+  });
+
   it("installs feature-dev workflow successfully", async () => {
     const result = await installWorkflow({ workflowId: "feature-dev" });
     assert.equal(result.workflowId, "feature-dev");

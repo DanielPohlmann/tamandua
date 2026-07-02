@@ -1,6 +1,6 @@
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 // We test the migration by directly importing getDb, which calls migrate().
 // But since getDb() uses a cached connection and resolves DB path from
 // env/home, we test the migration logic directly with an isolated DB.
-import { getDb, getDbPath, getSystemTokenSpend, incrementSystemTokenSpend, upsertAutoresearchSession, getAutoresearchSessions, getAutoresearchSessionById, deleteAutoresearchSession } from "../dist/db.js";
+import { getDb, getDbPath, getSystemTokenSpend, incrementSystemTokenSpend, upsertAutoresearchSession, getAutoresearchSessions, getAutoresearchSessionById, deleteAutoresearchSession, closeDb, deleteDbFiles } from "../dist/db.js";
 
 describe("run_worktrees table migration", () => {
   let tempHome: string;
@@ -922,5 +922,51 @@ describe("deleteAutoresearchSession", () => {
   it("returns false for nonexistent id", () => {
     const result = deleteAutoresearchSession("/nonexistent/id");
     assert.equal(result, false, "should return false for nonexistent id");
+  });
+});
+
+describe("deleteDbFiles", () => {
+  let tempHome: string;
+  let origHome: string | undefined;
+  let origDbPath: string | undefined;
+
+  beforeEach(() => {
+    tempHome = mkdtempSync(path.join(os.tmpdir(), "tamandua-deletedb-"));
+    origHome = process.env.HOME;
+    origDbPath = process.env.TAMANDUA_DB_PATH;
+    process.env.HOME = tempHome;
+    process.env.TAMANDUA_DB_PATH = path.join(tempHome, ".tamandua", "tamandua.db");
+  });
+
+  afterEach(() => {
+    if (origHome) process.env.HOME = origHome; else delete process.env.HOME;
+    if (origDbPath) process.env.TAMANDUA_DB_PATH = origDbPath; else delete process.env.TAMANDUA_DB_PATH;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it("removes the db file plus its WAL and SHM sidecars", () => {
+    const dbPath = getDbPath();
+    // Force creation of the db (and WAL sidecars via a write in WAL mode).
+    getDb();
+    assert.equal(existsSync(dbPath), true, "db file should exist after getDb()");
+
+    const removed = deleteDbFiles();
+
+    assert.ok(removed.includes(dbPath), "should report the db file as removed");
+    assert.equal(existsSync(dbPath), false, "db file should be gone");
+    assert.equal(existsSync(`${dbPath}-wal`), false, "WAL sidecar should be gone");
+    assert.equal(existsSync(`${dbPath}-shm`), false, "SHM sidecar should be gone");
+  });
+
+  it("is a no-op that returns empty when no db exists", () => {
+    closeDb();
+    const dbPath = getDbPath();
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+    rmSync(dbPath, { force: true });
+
+    const removed = deleteDbFiles();
+
+    assert.deepEqual(removed, [], "should return empty array when nothing to remove");
   });
 });
