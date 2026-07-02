@@ -90,21 +90,21 @@ describe("SKILL.md Hermes harness documentation", () => {
     );
   });
 
-  it("states pi is the default and recommended harness", () => {
+  it("states claude is the default harness", () => {
     assert.ok(
-      skillContent.match(/pi.*default|default.*pi/i),
-      "SKILL.md must state that pi is the default harness"
+      skillContent.match(/claude.*default|default.*claude/i),
+      "SKILL.md must state that claude is the default harness"
     );
     assert.ok(
-      skillContent.match(/recommended.*production|production.*recommended/i),
-      "SKILL.md must recommend pi for production use"
+      skillContent.includes("--claude-as-harness"),
+      "SKILL.md must document --claude-as-harness"
     );
   });
 
   it("workflow run command row includes harness flags", () => {
     assert.ok(
-      skillContent.includes("[--pi-as-harness | --hermes-as-harness]"),
-      "SKILL.md workflow run command row must show harness flags"
+      skillContent.includes("[--claude-as-harness | --pi-as-harness | --hermes-as-harness]"),
+      "SKILL.md workflow run command row must show all three harness flags"
     );
   });
 

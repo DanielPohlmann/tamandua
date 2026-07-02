@@ -244,7 +244,7 @@ flowchart LR
     CLI["tamandua CLI<br/>workflow run"] -->|create run| DB[("SQLite<br/>~/.tamandua/tamandua.db")]
     CLI -->|register run| Daemon["Background daemon<br/>control plane"]
     Daemon -->|schedules polling| Agents["Agent team<br/>planner · developer · verifier · tester"]
-    Agents -->|"pi --print"| Harness["pi harness<br/>(or Hermes, alpha)"]
+    Agents -->|"claude -p"| Harness["claude harness<br/>(or pi / Hermes)"]
     Agents -->|claim step / write results| DB
     DB --> Dashboard["Dashboard :3334<br/>Kanban + AutoResearch panels"]
     DB --> MCP["Remote MCP :3338<br/>14 tools"]
@@ -489,7 +489,7 @@ You're installing agent teams that run code on your machine. We take that seriou
 
 | Command | Description |
 |---------|-------------|
-| `tamandua workflow run <id> <task> [--working-directory-for-harness <dir>] [--pi-as-harness \| --hermes-as-harness]` | Start a run (defaults harness CWD to your current directory) |
+| `tamandua workflow run <id> <task> [--working-directory-for-harness <dir>] [--claude-as-harness \| --pi-as-harness \| --hermes-as-harness]` | Start a run (defaults harness CWD to your current directory) |
 | `tamandua workflow status <query>` | Check run status |
 | `tamandua workflow runs` | List all runs |
 | `tamandua workflow resume <run-id>` | Resume a failed run |
@@ -529,22 +529,29 @@ JSON endpoint is also useful for external integrations — see
 
 ### Harness Selection
 
-By default, Tamandua uses **pi** (`pi --print`) as its agent harness. You can
-override this with the harness selection flags on `tamandua workflow run`:
+By default, Tamandua uses the **Claude Code CLI** (`claude -p`) as its agent
+harness. You can override this with the harness selection flags on
+`tamandua workflow run`:
 
 | Flag | Description |
 |------|-------------|
-| `--pi-as-harness` | Use pi as the agent harness. **This is the default.** |
-| `--hermes-as-harness` | Use [Hermes](https://github.com/nicholasgasior/hermes) as the agent harness instead of pi. |
+| `--claude-as-harness` | Use the Claude Code CLI (`claude -p`) as the agent harness. **This is the default.** |
+| `--pi-as-harness` | Use [pi](https://github.com/mariozechner/pi-coding-agent) as the agent harness instead of claude. |
+| `--hermes-as-harness` | Use [Hermes](https://github.com/nicholasgasior/hermes) as the agent harness instead of claude. |
 
-These flags are **mutually exclusive** — specifying both is an error.
+These flags are **mutually exclusive** — specifying more than one is an error.
+
+Tamandua discovers the `claude` binary on your `PATH`; set
+`TAMANDUA_CLAUDE_BINARY` to point at a specific binary. Harness binary
+validation runs at scheduling time — if the selected harness binary isn't
+found or isn't executable, the run fails immediately with a clear error.
 
 #### Hermes Support (Alpha)
 
 > **⚠️ Alpha quality.** Hermes harness support is in **alpha** and has known
 > limitations: it is **very slow** compared to pi, and **token accounting is
 > broken** (token usage numbers in runs and the dashboard will be inaccurate).
-> Use pi (`--pi-as-harness`) for production workflows.
+> Use pi (`--pi-as-harness`) for production workflows if not using claude.
 
 To use a custom Hermes binary path, set the `TAMANDUA_HERMES_BINARY`
 environment variable:
@@ -608,8 +615,10 @@ The remote MCP endpoint exposes 14 tools:
 ## Requirements
 
 - Node.js >= 22
-- [pi](https://github.com/mariozechner/pi-coding-agent) installed on the host
-  - Tamandua uses pi for AI agent execution. Agents run via `pi --print` in non-interactive mode.
+- [Claude Code CLI](https://code.claude.com) (`claude`) installed on the host
+  - Tamandua's default harness. Agents run via `claude -p` in non-interactive mode.
+  - Set `TAMANDUA_CLAUDE_BINARY` to override the discovered binary.
+- Optional: [pi](https://github.com/mariozechner/pi-coding-agent) — only needed when running with `--pi-as-harness`.
 - `gh` CLI for PR creation steps
 
 ---

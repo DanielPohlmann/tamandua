@@ -46,7 +46,7 @@ Use these when managing workflow runs (outside individual step execution):
 tamandua workflow list [--json]
 tamandua workflow install <workflow-id|--all>
 tamandua workflow uninstall <workflow-id|--all> [--force]
-tamandua workflow run <workflow-id> "<task>" [--working-directory-for-harness <dir>] [--worktree-origin-repository <dir>] [--worktree-origin-ref <ref>] [--pi-as-harness | --hermes-as-harness] [--no-hurry-please-save-tokens-mode] [--no-relaunch-upon-rugpull]
+tamandua workflow run <workflow-id> "<task>" [--working-directory-for-harness <dir>] [--worktree-origin-repository <dir>] [--worktree-origin-ref <ref>] [--claude-as-harness | --pi-as-harness | --hermes-as-harness] [--no-hurry-please-save-tokens-mode] [--no-relaunch-upon-rugpull]
 tamandua workflow status <query>
 tamandua workflow runs
 tamandua workflow pause <run-id>
@@ -672,10 +672,20 @@ tamandua get-ready
 # -> MCP server is not running (start it with: tamandua mcp start)
 ```
 
-### 2.5) Hermes harness support (Alpha)
+### 2.5) Harness selection
 
-The `--hermes-as-harness` flag runs agents with the Hermes harness instead of
-the default pi harness.
+Tamandua uses the **Claude Code CLI** (`claude -p`) as the default harness.
+The `--claude-as-harness` flag selects it explicitly (rarely needed, since it
+is the default). Set `TAMANDUA_CLAUDE_BINARY` to override the discovered
+`claude` binary.
+
+```bash
+tamandua workflow run <workflow-id> "<task>" --claude-as-harness
+```
+
+The `--pi-as-harness` flag runs agents with the pi harness instead of the
+default claude harness. The `--hermes-as-harness` flag runs agents with the
+Hermes harness instead of the default claude harness.
 
 ```bash
 tamandua workflow run <workflow-id> "<task>" --hermes-as-harness
@@ -683,13 +693,10 @@ tamandua workflow run <workflow-id> "<task>" --hermes-as-harness
 
 > ⚠️ **Hermes support is in alpha.** It is **very slow** compared to pi, and
 > **token accounting is broken** — token counts reported by Hermes runs are
-> inaccurate. Pi is the default and recommended harness for production use.
+> inaccurate. Claude is the default and recommended harness for production use.
 
-The `--pi-as-harness` flag explicitly selects the pi harness (this is the
-default, so the flag is rarely needed unless a previous run used
-`--hermes-as-harness`).
-
-These flags are mutually exclusive — you cannot specify both in the same run.
+These flags are mutually exclusive — you cannot specify more than one in the
+same run.
 
 To use a custom Hermes binary, set the `TAMANDUA_HERMES_BINARY` environment
 variable:
