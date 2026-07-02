@@ -10,7 +10,7 @@
   <a href="https://igorhvr.github.io/tamandua/"><img src="https://img.shields.io/badge/website-tamandua-1f6feb.svg" alt="Website"></a>
 </p>
 
-Build your agent team in [pi](https://github.com/mariozechner/pi-coding-agent) with one command.
+Build your agent team on the [Claude Code CLI](https://code.claude.com) with one command.
 
 You don't need to hire a dev team. You need to define one. Tamandua gives you a team of specialized AI agents — planner, developer, verifier, tester, reviewer — that work together in reliable, repeatable workflows. One install. Zero infrastructure.
 
@@ -252,7 +252,7 @@ flowchart LR
 
 ### Minimal by design
 
-YAML + SQLite + polling. That's it. No Redis, no Kafka, no container orchestrator. Tamandua is a TypeScript CLI with zero external dependencies. It runs wherever pi runs.
+YAML + SQLite + polling. That's it. No Redis, no Kafka, no container orchestrator. Tamandua is a TypeScript CLI with zero external dependencies. It runs wherever the Claude Code CLI runs (or pi / Hermes).
 
 ---
 
