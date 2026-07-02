@@ -236,6 +236,42 @@ export function getDbPath(): string {
   return resolveDbPath();
 }
 
+/**
+ * Close the cached database connection, if any, and clear the cache so the
+ * next getDb() opens a fresh handle. Safe to call when no connection is open.
+ */
+export function closeDb(): void {
+  if (_db) {
+    try {
+      _db.close();
+    } catch {
+      // Ignore double-close / already-closed errors.
+    }
+    _db = null;
+    _dbPath = null;
+    _dbOpenedAt = 0;
+  }
+}
+
+/**
+ * Delete the SQLite database file and its WAL/SHM sidecars from disk. Closes
+ * any open connection first so the file handle is released (matters on
+ * Windows, where an open handle blocks deletion). Returns the paths that were
+ * actually removed; returns an empty array when nothing existed to delete.
+ */
+export function deleteDbFiles(): string[] {
+  closeDb();
+  const dbPath = resolveDbPath();
+  const removed: string[] = [];
+  for (const target of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (fs.existsSync(target)) {
+      fs.rmSync(target, { force: true });
+      removed.push(target);
+    }
+  }
+  return removed;
+}
+
 export function getSystemTokenSpend(): number {
   const db = getDb();
   const row = db.prepare(

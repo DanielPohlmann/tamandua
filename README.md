@@ -27,6 +27,7 @@ You don't need to hire a dev team. You need to define one. Tamandua gives you a 
 - [Security](#security)
 - [Commands](#commands)
 - [Requirements](#requirements)
+- [Development](#development)
 - [License](#license) · [Origins](#origins)
 
 ### Install from GitHub
@@ -483,7 +484,8 @@ You're installing agent teams that run code on your machine. We take that seriou
 | `tamandua source-path` | Print the Tamandua source checkout path |
 | `tamandua skill-path` | Print the path to the bundled tamandua-agents agent skill |
 | `tamandua update [--force]` | Pull the source checkout, rebuild, reinstall workflows, and restart previously running services |
-| `tamandua uninstall [--force]` | Full teardown (agents, crons, DB) |
+| `tamandua uninstall [--force]` | Full teardown of workflows, agent workspaces, agent registrations, and crons (stops dashboard/MCP). Keeps the database. |
+| `tamandua reset [--force]` | Factory reset: everything `uninstall` does, plus stops the control plane and **deletes the database** (`~/.tamandua/tamandua.db*`), wiping all dashboard history. Refuses if active runs exist unless `--force`. |
 
 ### Workflows
 
@@ -620,6 +622,51 @@ The remote MCP endpoint exposes 14 tools:
   - Set `TAMANDUA_CLAUDE_BINARY` to override the discovered binary.
 - Optional: [pi](https://github.com/mariozechner/pi-coding-agent) — only needed when running with `--pi-as-harness`.
 - `gh` CLI for PR creation steps
+
+---
+
+## Development
+
+### Running the tests
+
+Tests import from the compiled output, so **build first**, then run:
+
+```bash
+npm run build
+npm test
+```
+
+> **Heads-up on platform-dependent failures.** The full suite is written and
+> validated on Linux/macOS. On Windows — and on any host that doesn't have
+> every harness installed (`pi`, `hermes`) — a large fraction of tests fail
+> for **environment reasons, not code bugs**: symlink creation, the
+> `bin/tamandua` wrapper spawn, POSIX-only path expectations (`/tmp` vs
+> `C:\tmp`), and missing harness binaries. On such machines a raw pass/fail
+> count is **not** a reliable regression signal.
+
+**How to judge a change on a machine with pre-existing failures:**
+
+1. Build and run only the affected test file, e.g.
+   `node --test src/db.test.ts`.
+2. Compare against the clean committed baseline for the same file — stash your
+   changes, rebuild, run, then restore:
+
+   ```bash
+   git stash push -- <changed files>
+   npm run build && node --test <affected test file>   # baseline counts
+   git stash pop
+   npm run build && node --test <affected test file>   # your counts
+   ```
+
+   **Zero *new* failures** (identical or better counts) means no regression,
+   even if the absolute count is non-zero.
+3. For CLI behaviour, prefer a manual smoke test in an isolated home so you
+   never touch live state:
+
+   ```bash
+   HOME="$(mktemp -d)" TAMANDUA_DB_PATH="$HOME/.tamandua/tamandua.db" \
+     node dist/cli/cli.js <command>
+   ```
 
 ---
 

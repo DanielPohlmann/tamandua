@@ -192,6 +192,35 @@ Compare with `tamandua workflow uninstall <name> [--force]` which removes a
 single workflow without stopping services, and `tamandua workflow uninstall
 --all [--force]` which removes all workflows (also no service stops).
 
+Note that `uninstall` keeps the database — run history stays in
+`~/.tamandua/tamandua.db`. To wipe the database too, use `tamandua reset`.
+
+### 2.9a) Factory reset with tamandua reset
+
+`tamandua reset [--force]` is a full factory reset that returns Tamandua to
+its post-clone state. It does everything `uninstall` does, and additionally
+stops the control plane and **deletes the database** — wiping all dashboard
+history (runs, steps, stories, events, token stats).
+
+```bash
+tamandua reset [--force]
+```
+
+In order, reset:
+
+1. Checks for active runs (running or paused) and, unless `--force` is set,
+   refuses and exits if any exist.
+2. Stops the dashboard daemon, the MCP server, and the control plane (each
+   only if running).
+3. Uninstalls every workflow (workflow dirs, agent workspaces, agent
+   registrations in `agents.json`, crons, and managed worktrees).
+4. Deletes the SQLite database and its WAL/SHM sidecars
+   (`~/.tamandua/tamandua.db*`). A fresh empty database is recreated on the
+   next command.
+
+Use `reset` when you want to clear all dashboard data and start clean; use
+`uninstall` when you want to remove workflows/services but keep run history.
+
 ### 2.10) AutoResearch experiment commands
 
 AutoResearch runs durable optimization experiment loops. Sessions are stored
