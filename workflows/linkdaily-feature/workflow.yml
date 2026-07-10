@@ -1,0 +1,442 @@
+# LinkDaily feature pipeline — plan-driven.
+#
+# Product + spec + plans are produced REMOTELY by a human using the project skills
+# and land in docs/superpowers/specs/ + docs/superpowers/plans/. This workflow does
+# NOT re-plan: step 1 loads the approved spec (or plan set) and enumerates the plan
+# files as stories, one story per plan, ordered by their Prerequisites. Each plan is
+# then driven by superpowers:executing-plans (TDD, tests written alongside).
+# Flow: load -> implement (executing-plans per plan) <-> per-plan verify ->
+# E2E (conditional) -> review -> security (hard gate) -> local CI gate -> PR (never merges).
+#
+# Recommended run (worktree-isolated, PR against develop, never merges).
+# Pass a SPEC path (planner resolves its plans) or explicit plan path(s):
+#   tamandua workflow run linkdaily-feature "docs/superpowers/specs/<feature>-design.md" \
+#     --worktree-origin-repository C:/workspace/Diary/Projeto/linkdaily \
+#     --worktree-origin-ref develop
+#
+# Override the PR/base branch per run with: --context base_branch=main
+# Requires a GitHub remote + authenticated `gh` CLI for the pr step.
+#
+# Engine note: Tamandua steps are sequential and there is no cross-step goto
+# (retry_step is informational). The only true feedback loop is implement<->verify
+# per story. The e2e/review/security/ci-local steps are therefore write-capable
+# gates that FIX findings within the step (bounded by max_retries) and escalate to
+# a human only when a fix would require a product decision.
+id: linkdaily-feature
+name: LinkDaily Feature (plan-driven, PR)
+version: 1
+description: |
+  Plan-driven feature pipeline for LinkDaily. Loads an approved spec (or plan set)
+  from docs/superpowers/, enumerates its plan files as ordered stories (one per
+  plan), and drives each plan with superpowers:executing-plans under TDD (unit
+  tests written alongside). Verifies each plan, runs Aspire+Playwright E2E (only
+  for complete user-facing features), code review, a hard security gate
+  (OWASP/LGPD), the local CI gate (ci-local.bat + pnpm ci:local), and finally
+  opens a PR against the base branch — it never merges.
+polling:
+  model: default
+  timeoutSeconds: 120
+
+context:
+  base_branch: develop   # PR target + review/baseline diff. Override: --context base_branch=main
+
+agents:
+  - id: planner
+    name: Plan Loader
+    role: analysis
+    description: Reads the pre-approved plan file and derives ordered stories.
+    workspace:
+      baseDir: agents/planner
+      skills:
+        - tamandua-agents
+
+  - id: setup
+    name: Setup
+    role: coding
+    description: Creates the feature branch and establishes a build/test baseline.
+    workspace:
+      baseDir: agents/setup
+      skills:
+        - tamandua-agents
+
+  - id: developer
+    name: Developer
+    role: coding
+    description: Implements each story with unit tests; runs the CI gate; opens the PR.
+    timeoutSeconds: 2400
+    workspace:
+      baseDir: agents/developer
+      skills:
+        - tamandua-agents
+
+  - id: verifier
+    name: Verifier
+    role: verification
+    description: Per-story verification against acceptance criteria.
+    workspace:
+      baseDir: agents/verifier
+      skills:
+        - agent-browser
+        - tamandua-agents
+      files:
+        AGENTS.md: ../../agents/shared/verifier/AGENTS.md
+        SOUL.md: ../../agents/shared/verifier/SOUL.md
+        IDENTITY.md: ../../agents/shared/verifier/IDENTITY.md
+
+  - id: tester
+    name: E2E Tester
+    role: testing
+    description: Aspire + Playwright E2E for complete user-facing features.
+    timeoutSeconds: 2400
+    workspace:
+      baseDir: agents/tester
+      skills:
+        - tamandua-agents
+
+  - id: reviewer
+    name: Reviewer
+    role: coding
+    description: Code review with in-step adjustments (quality, architecture, conventions).
+    timeoutSeconds: 2400
+    workspace:
+      baseDir: agents/reviewer
+      skills:
+        - tamandua-agents
+
+  - id: security
+    name: Security Gate
+    role: coding
+    description: Hard security gate (OWASP/LGPD) that fixes high/critical findings.
+    timeoutSeconds: 2400
+    workspace:
+      baseDir: agents/security
+      skills:
+        - tamandua-agents
+
+steps:
+  - id: load-plan
+    agent: planner
+    input: |
+      You are loading a PRE-APPROVED design spec (or plan set) and enumerating the
+      implementation PLAN FILES to execute. You do NOT plan or invent scope — the
+      spec and plans were authored and approved by a human. Each plan file is one
+      story; the developer will drive each plan with superpowers:executing-plans.
+
+      INPUT: {{task}}
+        - If it is a SPEC path (docs/superpowers/specs/*-design.md): read it, then
+          resolve the ordered set of plan files under docs/superpowers/plans/ that
+          implement it.
+        - If it is one or more PLAN paths (docs/superpowers/plans/*.md, space- or
+          comma-separated): use them directly as the plan set.
+      BASE BRANCH: {{base_branch}}
+      You are already inside the repo/worktree (your current working directory is the repo root).
+
+      RETRY FEEDBACK (only present if your previous attempt was rejected — fix exactly what it raises):
+      {{retry_feedback}}
+
+      Instructions:
+      1. Read the input. If it is a spec, read its Scope and any Branch field.
+      2. Resolve the plan files that implement it:
+         - Prefer an explicit list in the spec (e.g. a "## Plans" section listing plan files in order).
+         - Otherwise match plans in docs/superpowers/plans/ by shared date/topic prefix and cross-check against the spec Scope.
+         - If you cannot CONFIDENTLY determine the full, correct plan set, STOP: end with STATUS: failed and a REASON asking the human to pass the explicit plan paths.
+      3. Order the plans by their declared "Prerequisites" (topological order — a plan another depends on runs first).
+      4. Read CLAUDE.md and .planning/codebase/ (ARCHITECTURE, STRUCTURE, CONVENTIONS, TESTING) to align branch naming and ubiquitous language.
+      5. Choose a fresh feature branch name (feature/<short-desc>). It MUST NOT be a default/integration branch (main, master, develop, dev, release).
+      6. Decide FEATURE_COMPLETE: does this spec/plan set deliver a COMPLETE user-facing feature (usable end to end by a real user)? true only if yes; false for backend-only/infra/refactor. This drives whether E2E runs.
+
+      Emit ONE story per plan file, in execution order (max 20). Each story:
+        - id: US-00N (in execution order)
+        - title: the plan's title
+        - description: MUST begin with a line "PLAN_FILE: <path/to/plan.md>", then the plan's Goal and its Prerequisites.
+        - acceptanceCriteria: derived from the plan Goal PLUS these three, always: "All files in the plan's File Map are created/modified as specified (including its unit-test files)", "Unit tests written test-first and passing", "Build passes".
+
+      Reply with:
+      STATUS: done
+      REPO: <absolute path to the repo root>
+      BRANCH: <fresh feature branch name>
+      FEATURE_COMPLETE: <true|false>
+      PLAN_SET: <ordered list of the plan file paths you will execute>
+      PLAN_SUMMARY: <2-4 line summary of what the spec/plan set delivers>
+      STORIES_JSON: [ ... literal JSON array, one story per plan, in execution order ... ]
+
+      The STORIES_JSON line is REQUIRED and MUST be a literal JSON array — without it the run cannot proceed.
+      If the input cannot be read or the plan set cannot be resolved confidently, end with STATUS: failed and a REASON: line.
+    expects: "STATUS: done"
+    max_retries: 3
+    on_fail:
+      escalate_to: human
+
+  - id: setup
+    agent: setup
+    input: |
+      Prepare the LinkDaily worktree for this feature.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      BASE BRANCH: {{base_branch}}
+      SPEC/PLANS: {{task}}
+
+      RETRY FEEDBACK (only present if your previous attempt was rejected):
+      {{retry_feedback}}
+
+      Instructions:
+      1. Ensure you are at the repo root ({{repo}}).
+      2. Create the feature branch: git checkout -b {{branch}} (if it already exists, just check it out).
+      3. Read CLAUDE.md and .planning/codebase/STACK.md + TESTING.md to learn the exact build/test commands and project layout.
+      4. Establish a baseline WITHOUT pushing:
+         - Backend: build the solution and identify the unit-test command.
+         - Frontends (frontend/admin-spa, frontend/public-nuxt): identify their commands only if the plan touches them.
+      5. Do NOT run the full lefthook/ci-local here — only enough to confirm the tree builds.
+
+      Reply with:
+      STATUS: done
+      BUILD_CMD: <backend build command>
+      TEST_CMD: <backend unit-test command>
+      FRONTEND_CMD: <frontend ci/test command, or "n/a">
+      BASELINE: <baseline result — does it build/test clean?>
+    expects: "STATUS: done"
+    max_retries: 3
+    on_fail:
+      escalate_to: human
+
+  - id: implement
+    agent: developer
+    type: loop
+    loop:
+      over: stories
+      completion: all_done
+      fresh_session: true
+      verify_each: true
+      verify_step: verify
+    input: |
+      Implement ONE plan from the approved set by DRIVING IT WITH
+      superpowers:executing-plans, in a fresh session, following LinkDaily's
+      CLAUDE.md and .planning/codebase conventions. This story IS one plan file.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      BUILD_CMD: {{build_cmd}}
+      TEST_CMD: {{test_cmd}}
+
+      CURRENT PLAN (this story = one plan file; its PLAN_FILE path is the first line of the description):
+      {{current_story}}
+
+      COMPLETED PLANS:
+      {{completed_stories}}
+      PLANS REMAINING: {{stories_remaining}}
+
+      VERIFY FEEDBACK (if retrying — fix exactly what it raised):
+      {{verify_feedback}}
+
+      PROGRESS LOG:
+      {{progress}}
+
+      Instructions:
+      1. Read progress-{{run_id}}.txt (the Codebase Patterns section first). Pull latest on the branch.
+      2. Extract the PLAN_FILE path from the current story. ALWAYS drive this plan with superpowers:executing-plans — announce it and follow the plan task-by-task, honoring its checkbox (- [ ]) steps and running the verifications it specifies. (If the plan's own header recommends superpowers:subagent-driven-development and subagents are available, follow the plan's guidance.)
+      3. Enforce TDD (superpowers:test-driven-development): NO production code without a failing test first. The plan's File Map lists the unit-test files — write them test-first (Red → Green → Refactor). Backend logic never ships without tests.
+      4. BEFORE coding each part, consult the relevant project skills (they override training data) — see the mapping table in your AGENTS.md (DDD, MediatR/MassTransit, Validot, stack-i18n for ANY user-facing text, etc.). Respect bounded-context boundaries and ubiquitous language.
+      5. Commit following the repository's CLAUDE.md commit conventions. One logical change per commit.
+      6. Rewrite progress-{{run_id}}.txt with this plan's results and any reusable patterns.
+
+      DO NOT run superpowers:finishing-a-development-branch and DO NOT open a PR — this pipeline owns branch completion, CI, and PR in later steps. Stop once this plan's tasks are implemented, its tests pass, and changes are committed.
+
+      FINAL VALIDATION (before reporting done):
+      - Every unit-test file in the plan's File Map exists and passes.
+      - Every new/changed unit of backend logic has a corresponding test that was written test-first.
+      - Build and {{test_cmd}} are green.
+      If any of these is missing, the plan is NOT done — finish it or report the blocker.
+
+      Never stage or commit secrets (.env, *.key, *.pem, credentials.*, node_modules/).
+
+      Reply with:
+      STATUS: done
+      CHANGES: what you implemented (reference the PLAN_FILE)
+      TESTS: the unit tests written (test-first) and their result
+    expects: "STATUS: done"
+    max_retries: 4
+    on_fail:
+      escalate_to: human
+
+  - id: verify
+    agent: verifier
+    input: |
+      Verify the developer's execution of the CURRENT PLAN.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      CHANGES: {{changes}}
+      TEST_CMD: {{test_cmd}}
+
+      CURRENT PLAN (its PLAN_FILE path is the first line of the description):
+      {{current_story}}
+
+      PROGRESS LOG:
+      {{progress}}
+
+      Check (open the PLAN_FILE and use its File Map as the checklist):
+      1. The plan's File Map is realized — every file created/modified as specified (spot-check the key ones), no TODOs or placeholders.
+      2. Every unit-test file listed in the plan's File Map exists.
+      3. Unit tests pass (run {{test_cmd}}) and exercise real behavior for the plan (not just mocks).
+      4. Build/typecheck passes.
+      5. The plan's Goal / acceptance criteria are met.
+
+      Has frontend changes: {{has_frontend_changes}}
+      If 'true', use the agent-browser skill to render the changed UI and confirm it is not broken (layout, missing elements, unstyled content). If 'false', skip visual checks.
+
+      Reply with:
+      STATUS: done
+      VERIFIED: what you confirmed
+
+      Or if incomplete:
+      STATUS: retry
+      ISSUES:
+      - what is missing (e.g. missing test file, failing test, unrealized File Map entry)
+    expects: "STATUS: done"
+    on_fail:
+      retry_step: implement
+      max_retries: 4
+      on_exhausted:
+        escalate_to: human
+
+  - id: e2e
+    agent: tester
+    input: |
+      End-to-end verification of the completed feature.
+
+      FEATURE COMPLETE: {{feature_complete}}
+
+      If FEATURE COMPLETE is 'false', this plan does not deliver a complete
+      user-facing feature — SKIP E2E. Reply immediately with:
+      STATUS: done
+      RESULTS: E2E skipped — FEATURE_COMPLETE=false (not a complete user-facing feature).
+
+      If FEATURE COMPLETE is 'true', run the real LinkDaily E2E suite:
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      CHANGES: {{changes}}
+
+      Instructions:
+      1. Consult the QA:e2e-functional-testing skill — the suite boots the whole distributed app via Aspire (DistributedApplicationTestingBuilder) and drives a real browser (xUnit + Microsoft.Playwright .NET) in tests/E2E/LinkDaily.E2E.Tests.
+      2. Run the E2E suite. If this feature is user-facing and lacks E2E coverage, write happy-path + main error-case tests per the skill (Page Objects, web-first assertions), then run.
+      3. If a test fails due to a real product bug, FIX the bug (and/or the test if the test itself is wrong), commit following repo conventions, and re-run until green.
+      4. Keep changes scoped to making the feature work end to end.
+
+      Reply with:
+      STATUS: done
+      RESULTS: what you ran/wrote and the outcome
+
+      If you cannot get E2E green after honest effort, end with STATUS: failed and a REASON: line.
+    expects: "STATUS: done"
+    max_retries: 3
+    on_fail:
+      escalate_to: human
+
+  - id: review
+    agent: reviewer
+    input: |
+      Code review WITH in-step adjustments for the branch changes.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      BASE BRANCH: {{base_branch}}
+      CHANGES: {{changes}}
+
+      Instructions:
+      1. Review the full diff vs the base branch: git diff origin/{{base_branch}}...HEAD (fall back to {{base_branch}}...HEAD if no remote ref). Use the project `review` skill for the standard.
+      2. Assess: correctness/bugs, Clean Code & SOLID, Clean Architecture layering, DDD boundary adherence (no cross-module type imports, aggregates by id), test coverage, i18n for user-facing strings, and the conventions in .planning/codebase.
+      3. For every issue found, FIX it directly, add/adjust tests, and commit (repo conventions). Re-run the affected unit tests.
+      4. Re-review after fixing to confirm the diff is clean. Only pass when it is.
+
+      Reply with:
+      STATUS: done
+      DECISION: approved
+      REVIEW: summary of findings and what you changed
+
+      If issues remain that you cannot responsibly fix because they would require a product decision or contradict the approved plan/spec (do NOT invent product decisions), end with STATUS: failed and a REASON: line describing what a human must decide.
+    expects: "STATUS: done"
+    max_retries: 3
+    on_fail:
+      escalate_to: human
+
+  - id: security
+    agent: security
+    input: |
+      HARD security gate for the branch changes. High/critical findings MUST be
+      fixed before the PR opens.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      BASE BRANCH: {{base_branch}}
+      CHANGES: {{changes}}
+
+      Instructions:
+      1. Use the project security skills (security:security-owasp, security-input-validation, security-authentication, security-data-protection, stack-hygiene). Cover OWASP Top 10, authz/authn, injection, insecure deserialization, SSRF, access control, secrets, and PII handling under LGPD/GDPR.
+      2. Review the diff vs the base branch plus any new endpoints, consumers, queries, and config. Confirm user-facing errors go through localization and leak no internals, and that RabbitMQ messages carry only the fields consumers need.
+      3. FIX every HIGH or CRITICAL finding directly, add regression tests where feasible, and commit (repo conventions). MEDIUM/LOW: fix if cheap, otherwise document them.
+      4. Re-check after fixing. Only pass when no HIGH/CRITICAL remains.
+
+      Reply with:
+      STATUS: done
+      SECURITY: findings and what you fixed (note any documented MEDIUM/LOW left open)
+
+      If a HIGH/CRITICAL cannot be fixed without a human/product decision, end with STATUS: failed and a REASON: line — do NOT let the PR open with an unresolved high risk.
+    expects: "STATUS: done"
+    max_retries: 3
+    on_fail:
+      escalate_to: human
+
+  - id: ci-local
+    agent: developer
+    input: |
+      Run the LinkDaily LOCAL CI gate and make it fully green before the PR.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+
+      Instructions:
+      1. This is the gate lefthook enforces on push. Run it explicitly now (read CLAUDE.md "Push & Quality Gates" for exact scope):
+         - Backend: src/ci-local.bat (format, build, tests, vulnerability scan).
+         - Frontend, ONLY if the plan touched them:
+             frontend/admin-spa  -> pnpm ci:local (audit, lint, typecheck, test coverage)
+             frontend/public-nuxt -> pnpm ci:local (audit, lint, typecheck)
+      2. If anything fails, FIX the root cause, commit (repo conventions), and re-run until every gate is green. Do NOT disable checks or skip tests to pass.
+
+      Reply with:
+      STATUS: done
+      CI: which gates you ran and their final (green) result
+
+      If a gate cannot pass after honest effort, end with STATUS: failed and a REASON: line.
+    expects: "STATUS: done"
+    max_retries: 3
+    on_fail:
+      escalate_to: human
+
+  - id: pr
+    agent: developer
+    input: |
+      Open the pull request. Do NOT merge — opening the PR is the end of the line.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      BASE BRANCH: {{base_branch}}
+      PLAN: {{task}}
+      CHANGES: {{changes}}
+      REVIEW: {{review}}
+      SECURITY: {{security}}
+      CI: {{ci}}
+
+      Instructions:
+      1. The local CI gate already ran and is green, so push WITHOUT re-running hooks:
+         git push --no-verify -u origin {{branch}}
+      2. Open the PR against the base branch:
+         gh pr create --base {{base_branch}} --head {{branch}} --title "<clear title>" --body "<what & why; link the plan {{task}}; tests run; review + security summary>"
+      3. Do NOT merge, squash, rebase-merge, or close the PR. Stop once it is open.
+
+      Reply with:
+      STATUS: done
+      PR: <URL to the pull request>
+    expects: "STATUS: done\nregex:PR:\\s*https?://github\\.com/[^/]+/[^/]+/pull/\\d+"
+    on_fail:
+      escalate_to: human
