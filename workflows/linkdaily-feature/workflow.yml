@@ -236,7 +236,7 @@ steps:
       1. Read progress-{{run_id}}.txt (the Codebase Patterns section first). Pull latest on the branch.
       2. Extract the PLAN_FILE path from the current story. ALWAYS drive this plan with superpowers:executing-plans — announce it and follow the plan task-by-task, honoring its checkbox (- [ ]) steps and running the verifications it specifies. (If the plan's own header recommends superpowers:subagent-driven-development and subagents are available, follow the plan's guidance.)
       3. Enforce TDD (superpowers:test-driven-development): NO production code without a failing test first. The plan's File Map lists the unit-test files — write them test-first (Red → Green → Refactor). Backend logic never ships without tests.
-      4. BEFORE coding each part, consult the relevant project skills (they override training data) — see the mapping table in your AGENTS.md (DDD, MediatR/MassTransit, Validot, stack-i18n for ANY user-facing text, etc.). Respect bounded-context boundaries and ubiquitous language.
+      4. BEFORE coding each part, list the skills available in your environment and consult the relevant project skill for that domain (skills override training data — see your AGENTS.md). Load only what the current story touches. Respect bounded-context boundaries and ubiquitous language.
       5. Commit following the repository's CLAUDE.md commit conventions. One logical change per commit.
       6. Rewrite progress-{{run_id}}.txt with this plan's results and any reusable patterns.
 
