@@ -1,4 +1,4 @@
-# LinkDaily feature pipeline — plan-driven.
+# Superpowers feature pipeline — plan-driven.
 #
 # Product + spec + plans are produced REMOTELY by a human using the project skills
 # and land in docs/superpowers/specs/ + docs/superpowers/plans/. This workflow does
@@ -10,8 +10,8 @@
 #
 # Recommended run (worktree-isolated, PR against develop, never merges).
 # Pass a SPEC path (planner resolves its plans) or explicit plan path(s):
-#   tamandua workflow run linkdaily-feature "docs/superpowers/specs/<feature>-design.md" \
-#     --worktree-origin-repository C:/workspace/Diary/Projeto/linkdaily \
+#   tamandua workflow run superpowers-feature "docs/superpowers/specs/<feature>-design.md" \
+#     --worktree-origin-repository <path-to-your-repo> \
 #     --worktree-origin-ref develop
 #
 # Override the PR/base branch per run with: --context base_branch=main
@@ -22,17 +22,17 @@
 # per story. The e2e/review/security/ci-local steps are therefore write-capable
 # gates that FIX findings within the step (bounded by max_retries) and escalate to
 # a human only when a fix would require a product decision.
-id: linkdaily-feature
-name: LinkDaily Feature (plan-driven, PR)
+id: superpowers-feature
+name: Superpowers Feature (plan-driven, PR)
 version: 1
 description: |
-  Plan-driven feature pipeline for LinkDaily. Loads an approved spec (or plan set)
+  Plan-driven feature pipeline. Loads an approved spec (or plan set)
   from docs/superpowers/, enumerates its plan files as ordered stories (one per
   plan), and drives each plan with superpowers:executing-plans under TDD (unit
-  tests written alongside). Verifies each plan, runs Aspire+Playwright E2E (only
-  for complete user-facing features), code review, a hard security gate
-  (OWASP/LGPD), the local CI gate (ci-local.bat + pnpm ci:local), and finally
-  opens a PR against the base branch — it never merges.
+  tests written alongside). Verifies each plan, runs E2E (only for complete
+  user-facing features), code review, a hard security gate, the local CI gate,
+  and finally opens a PR against the base branch — it never merges. Every step
+  consults the skills the target project's CLAUDE.md defines for its domain.
 polling:
   model: default
   timeoutSeconds: 120
@@ -85,8 +85,10 @@ agents:
 
   - id: tester
     name: E2E Tester
-    role: testing
-    description: Aspire + Playwright E2E for complete user-facing features.
+    # role coding, not testing: this is a write-capable gate — it writes missing
+    # E2E tests, fixes real bugs, and commits (the `testing` role is no-write).
+    role: coding
+    description: Whole-app E2E for complete user-facing features.
     timeoutSeconds: 2400
     workspace:
       baseDir: agents/tester
@@ -170,7 +172,7 @@ steps:
   - id: setup
     agent: setup
     input: |
-      Prepare the LinkDaily worktree for this feature.
+      Prepare the worktree for this feature.
 
       REPO: {{repo}}
       BRANCH: {{branch}}
@@ -211,13 +213,14 @@ steps:
       verify_step: verify
     input: |
       Implement ONE plan from the approved set by DRIVING IT WITH
-      superpowers:executing-plans, in a fresh session, following LinkDaily's
+      superpowers:executing-plans, in a fresh session, following the project's
       CLAUDE.md and .planning/codebase conventions. This story IS one plan file.
 
       REPO: {{repo}}
       BRANCH: {{branch}}
       BUILD_CMD: {{build_cmd}}
       TEST_CMD: {{test_cmd}}
+      SPEC/PLANS (overall input, for context): {{task}}
 
       CURRENT PLAN (this story = one plan file; its PLAN_FILE path is the first line of the description):
       {{current_story}}
@@ -229,6 +232,9 @@ steps:
       VERIFY FEEDBACK (if retrying — fix exactly what it raised):
       {{verify_feedback}}
 
+      TIMEOUT RETRY (if the previous attempt timed out — check git log/status first and resume from where it stopped instead of redoing finished work):
+      {{timeout_retry}}
+
       PROGRESS LOG:
       {{progress}}
 
@@ -237,15 +243,18 @@ steps:
       2. Extract the PLAN_FILE path from the current story. ALWAYS drive this plan with superpowers:executing-plans — announce it and follow the plan task-by-task, honoring its checkbox (- [ ]) steps and running the verifications it specifies. (If the plan's own header recommends superpowers:subagent-driven-development and subagents are available, follow the plan's guidance.)
       3. Enforce TDD (superpowers:test-driven-development): NO production code without a failing test first. The plan's File Map lists the unit-test files — write them test-first (Red → Green → Refactor). Backend logic never ships without tests.
       4. BEFORE coding each part, list the skills available in your environment and consult the relevant project skill for that domain (skills override training data — see your AGENTS.md). Load only what the current story touches. Respect bounded-context boundaries and ubiquitous language.
-      5. Commit following the repository's CLAUDE.md commit conventions. One logical change per commit.
-      6. Rewrite progress-{{run_id}}.txt with this plan's results and any reusable patterns.
+      5. If a test fails unexpectedly or a fix does not work on the second attempt, STOP guessing and apply superpowers:systematic-debugging — hypothesize, isolate, verify — before touching more code.
+      6. Update the living docs when the change warrants it, per the project CLAUDE.md update rules (e.g. .planning/codebase/ — architecture, structure, stack, conventions, testing — including their Analysis Date). Docs-only edits ride along with the plan's commits.
+      7. Commit following the repository's CLAUDE.md commit conventions. One logical change per commit.
+      8. Rewrite progress-{{run_id}}.txt with this plan's results and any reusable patterns.
 
       DO NOT run superpowers:finishing-a-development-branch and DO NOT open a PR — this pipeline owns branch completion, CI, and PR in later steps. Stop once this plan's tasks are implemented, its tests pass, and changes are committed.
 
-      FINAL VALIDATION (before reporting done):
+      FINAL VALIDATION (before reporting done) — run superpowers:verification-before-completion against this checklist:
       - Every unit-test file in the plan's File Map exists and passes.
       - Every new/changed unit of backend logic has a corresponding test that was written test-first.
       - Build and {{test_cmd}} are green.
+      - Living docs updated if the change warranted it.
       If any of these is missing, the plan is NOT done — finish it or report the blocker.
 
       Never stage or commit secrets (.env, *.key, *.pem, credentials.*, node_modules/).
@@ -295,8 +304,9 @@ steps:
       - what is missing (e.g. missing test file, failing test, unrealized File Map entry)
     expects: "STATUS: done"
     on_fail:
+      # retry_step is informational; per-story retries are engine-fixed at 4.
+      # (on_fail.max_retries is not read by the runtime — deliberately omitted.)
       retry_step: implement
-      max_retries: 4
       on_exhausted:
         escalate_to: human
 
@@ -312,15 +322,18 @@ steps:
       STATUS: done
       RESULTS: E2E skipped — FEATURE_COMPLETE=false (not a complete user-facing feature).
 
-      If FEATURE COMPLETE is 'true', run the real LinkDaily E2E suite:
+      If FEATURE COMPLETE is 'true', run the real E2E suite:
       REPO: {{repo}}
       BRANCH: {{branch}}
       CHANGES: {{changes}}
 
+      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
+      {{retry_feedback}}
+
       Instructions:
-      1. Consult the QA:e2e-functional-testing skill — the suite boots the whole distributed app via Aspire (DistributedApplicationTestingBuilder) and drives a real browser (xUnit + Microsoft.Playwright .NET) in tests/E2E/LinkDaily.E2E.Tests.
+      1. Consult the E2E / functional-testing skill your project's CLAUDE.md defines (it overrides training data) to learn how the suite boots the app and drives a real browser, and follow it exactly.
       2. Run the E2E suite. If this feature is user-facing and lacks E2E coverage, write happy-path + main error-case tests per the skill (Page Objects, web-first assertions), then run.
-      3. If a test fails due to a real product bug, FIX the bug (and/or the test if the test itself is wrong), commit following repo conventions, and re-run until green.
+      3. If a test fails due to a real product bug, apply superpowers:systematic-debugging (hypothesize, isolate, verify — no blind retries), FIX the bug (and/or the test if the test itself is wrong), commit following repo conventions, and re-run until green.
       4. Keep changes scoped to making the feature work end to end.
 
       Reply with:
@@ -343,9 +356,12 @@ steps:
       BASE BRANCH: {{base_branch}}
       CHANGES: {{changes}}
 
+      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
+      {{retry_feedback}}
+
       Instructions:
-      1. Review the full diff vs the base branch: git diff origin/{{base_branch}}...HEAD (fall back to {{base_branch}}...HEAD if no remote ref). Use the project `review` skill for the standard.
-      2. Assess: correctness/bugs, Clean Code & SOLID, Clean Architecture layering, DDD boundary adherence (no cross-module type imports, aggregates by id), test coverage, i18n for user-facing strings, and the conventions in .planning/codebase.
+      1. Review the full diff vs the base branch: git diff origin/{{base_branch}}...HEAD (fall back to {{base_branch}}...HEAD if no remote ref). Use whatever code-review skill your project's CLAUDE.md defines as the standard (it overrides training data).
+      2. Assess: correctness/bugs, Clean Code & SOLID, Clean Architecture layering, DDD boundary adherence (no cross-module type imports, aggregates by id), test coverage, i18n for user-facing strings, living docs updated when the diff warrants it (per the project CLAUDE.md update rules), and the conventions in .planning/codebase.
       3. For every issue found, FIX it directly, add/adjust tests, and commit (repo conventions). Re-run the affected unit tests.
       4. Re-review after fixing to confirm the diff is clean. Only pass when it is.
 
@@ -371,8 +387,11 @@ steps:
       BASE BRANCH: {{base_branch}}
       CHANGES: {{changes}}
 
+      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
+      {{retry_feedback}}
+
       Instructions:
-      1. Use the project security skills (security:security-owasp, security-input-validation, security-authentication, security-data-protection, stack-hygiene). Cover OWASP Top 10, authz/authn, injection, insecure deserialization, SSRF, access control, secrets, and PII handling under LGPD/GDPR.
+      1. Use whatever security skills your project's CLAUDE.md defines for this work (they override training data) — covering the OWASP Top 10, input validation, authentication/authorization, data protection, and supply chain. Cover authz/authn, injection, insecure deserialization, SSRF, access control, secrets, and PII handling under LGPD/GDPR.
       2. Review the diff vs the base branch plus any new endpoints, consumers, queries, and config. Confirm user-facing errors go through localization and leak no internals, and that RabbitMQ messages carry only the fields consumers need.
       3. FIX every HIGH or CRITICAL finding directly, add regression tests where feasible, and commit (repo conventions). MEDIUM/LOW: fix if cheap, otherwise document them.
       4. Re-check after fixing. Only pass when no HIGH/CRITICAL remains.
@@ -390,10 +409,13 @@ steps:
   - id: ci-local
     agent: developer
     input: |
-      Run the LinkDaily LOCAL CI gate and make it fully green before the PR.
+      Run the project's LOCAL CI gate and make it fully green before the PR.
 
       REPO: {{repo}}
       BRANCH: {{branch}}
+
+      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
+      {{retry_feedback}}
 
       Instructions:
       1. This is the gate lefthook enforces on push. Run it explicitly now (read CLAUDE.md "Push & Quality Gates" for exact scope):
@@ -401,7 +423,7 @@ steps:
          - Frontend, ONLY if the plan touched them:
              frontend/admin-spa  -> pnpm ci:local (audit, lint, typecheck, test coverage)
              frontend/public-nuxt -> pnpm ci:local (audit, lint, typecheck)
-      2. If anything fails, FIX the root cause, commit (repo conventions), and re-run until every gate is green. Do NOT disable checks or skip tests to pass.
+      2. If anything fails, apply superpowers:systematic-debugging to find the root cause, FIX it, commit (repo conventions), and re-run until every gate is green. Do NOT disable checks or skip tests to pass.
 
       Reply with:
       STATUS: done
@@ -426,6 +448,9 @@ steps:
       REVIEW: {{review}}
       SECURITY: {{security}}
       CI: {{ci}}
+
+      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises, e.g. push rejection or gh auth):
+      {{retry_feedback}}
 
       Instructions:
       1. The local CI gate already ran and is green, so push WITHOUT re-running hooks:
