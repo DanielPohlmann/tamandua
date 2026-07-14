@@ -57,10 +57,28 @@ npm install
 echo "Building..."
 npm run build
 
-# Create symlink
+# Create launcher at ~/.local/bin/tamandua.
+#
+# On Git Bash/MSYS a plain `ln -sf` silently makes a *copy* instead of a real
+# symlink unless winsymlinks:nativestrict is set — and a copy breaks
+# bin/tamandua's `readlink -f "$0"` resolution (it would look for dist/ under
+# ~/.local instead of the repo). Native symlinks, however, require Windows
+# Developer Mode or admin, so nativestrict may fail with "Operation not
+# permitted". To always end up with a working launcher: try a real symlink
+# first, and if that's not permitted, write a thin wrapper that execs the repo
+# launcher by absolute path (so readlink -f still resolves dist/ against the
+# real checkout).
 mkdir -p "$HOME/.local/bin"
-ln -sf "$REPO_DIR/bin/tamandua" "$HOME/.local/bin/tamandua"
-chmod +x "$HOME/.local/bin/tamandua"
+LAUNCHER="$HOME/.local/bin/tamandua"
+if ! MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -sf "$REPO_DIR/bin/tamandua" "$LAUNCHER" 2>/dev/null; then
+  echo "Note: symlinks not permitted; writing a wrapper launcher instead."
+  cat > "$LAUNCHER" <<EOF
+#!/bin/sh
+# Auto-generated wrapper — execs the tamandua launcher in its repo checkout.
+exec "$REPO_DIR/bin/tamandua" "\$@"
+EOF
+fi
+chmod +x "$LAUNCHER"
 
 # Install bundled workflows
 set +e
