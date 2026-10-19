@@ -88,6 +88,18 @@ describe("gate loop through step-ops", () => {
     assert.equal(status("fix"), "waiting");
   });
 
+  it("a fix round after a malformed retry resets the gate's retry_count", () => {
+    getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();
+    getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-review'").run();
+    completeStep("s-review", "STATUS: retry\nFINDINGS_JSON: [nope");
+    getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-review'").run();
+    const finding = { rule: "review/naming", severity: "major", file: "src/A.cs", evidence: "x" };
+    const result = completeStep("s-review", `STATUS: retry\nFINDINGS_JSON: [${JSON.stringify(finding)}]`);
+    assert.equal(result.status, "fixing");
+    const gate = getDb().prepare("SELECT retry_count FROM steps WHERE id = 's-review'").get() as { retry_count: number };
+    assert.equal(gate.retry_count, 0);
+  });
+
   it("an agent gate replying STATUS: done advances normally", () => {
     getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();
     getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-review'").run();

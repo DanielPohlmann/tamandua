@@ -185,7 +185,7 @@ function startFixRound(gate: GateStepRow, policy: FixPolicy, actionable: StoredF
       reason: `Fix step "${policy.fix_step}" not found in run`, output });
   }
   inTransaction(() => {
-    db.prepare("UPDATE steps SET status = 'waiting', output = ?, fix_rounds = fix_rounds + 1, updated_at = datetime('now') WHERE id = ?")
+    db.prepare("UPDATE steps SET status = 'waiting', output = ?, fix_rounds = fix_rounds + 1, retry_count = 0, updated_at = datetime('now') WHERE id = ?")
       .run(output, gate.id);
     db.prepare("UPDATE runs SET fix_rounds = fix_rounds + 1, updated_at = datetime('now') WHERE id = ?").run(gate.run_id);
     mergeRunContext(gate.run_id, { fix_feedback: toFixFeedback(actionable), fix_origin: gate.step_id });
