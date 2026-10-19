@@ -34,11 +34,19 @@ export type PollingConfig = {
   timeoutSeconds?: number;
 };
 
+export const BASH_RUNNER_AGENT_ID = "bash-runner";
+
+/** Run-context key holding the workflow-declared context keys that bash steps may see as env vars. */
+export const BASH_ENV_KEYS_CONTEXT_KEY = "__env_keys";
+
 export type WorkflowStepFailure = {
   retry_step?: string;
   max_retries?: number;
   on_exhausted?: { escalate_to: string } | { escalate_to?: string } | undefined;
   escalate_to?: string;
+  fix_step?: string;
+  max_rounds?: number;
+  return_step?: string;
 };
 
 export type LoopConfig = {
@@ -56,12 +64,18 @@ export type LoopConfig = {
 export type WorkflowStep = {
   id: string;
   agent: string;
-  type?: "single" | "loop";
+  type?: "single" | "loop" | "bash";
   loop?: LoopConfig;
+  run?: string;
   input: string;
   expects: string;
   max_retries?: number;
   on_fail?: WorkflowStepFailure;
+};
+
+export type WorkflowBudgets = {
+  max_fix_rounds?: number;
+  max_tokens?: number;
 };
 
 export type Story = {
@@ -87,6 +101,7 @@ export type WorkflowSpec = {
   agents: WorkflowAgent[];
   steps: WorkflowStep[];
   context?: Record<string, string>;
+  budgets?: WorkflowBudgets;
   notifications?: {
     url?: string;
   };
