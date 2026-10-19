@@ -143,6 +143,33 @@ describe("gate loop through step-ops", () => {
     assert.equal(context.blocked_reason, "needs a human");
   });
 
+  it("a fix step replying STATUS: blocked without REASON does not reuse an earlier step's reason", () => {
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ reason: "stale reason", status: "done" }));
+    getDb().prepare("UPDATE steps SET status = 'running', invoked_by = 'gate-unit' WHERE step_id = 'fix'").run();
+    completeStep("s-fix", "STATUS: blocked");
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(context.blocked_reason, "Fix step reported STATUS: blocked");
+  });
+
+  it("a gate replying STATUS: blocked without REASON does not reuse an earlier step's reason", () => {
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ reason: "stale reason" }));
+    getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();
+    getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-review'").run();
+    const result = completeStep("s-review", "STATUS: blocked");
+    assert.equal(result.status, "blocked");
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(context.blocked_reason, "Step reported STATUS: blocked");
+  });
+
+  it("a gate without a STATUS line does not inherit a stale STATUS: retry from the run context", () => {
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ status: "retry" }));
+    getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();
+    getDb().prepare("UPDATE steps SET status = 'running', expects = '' WHERE step_id = 'gate-review'").run();
+    const result = completeStep("s-review", "VERDICT: fine");
+    assert.equal(result.status, "advanced");
+    assert.equal(status("fix"), "waiting");
+  });
+
   it("a fix step replying STATUS: retry is retried and stays claimable", () => {
     getDb().prepare("UPDATE steps SET status = 'running', invoked_by = 'gate-unit' WHERE step_id = 'fix'").run();
     const result = completeStep("s-fix", "STATUS: retry");

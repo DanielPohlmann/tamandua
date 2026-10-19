@@ -1376,17 +1376,17 @@ export function completeStep(stepId: string, output: string): { status: string; 
   }
 
   if (step.invoked_by) {
-    const fixStatus = context["status"]?.toLowerCase();
+    const fixStatus = parsed["status"]?.toLowerCase();
     if (fixStatus === "blocked") {
       const blocked = blockRunAtStep({
         runId, stepDbId: step.id, stepName: step.step_id,
-        reason: context["reason"] || "Fix step reported STATUS: blocked", output,
+        reason: parsed["reason"] || "Fix step reported STATUS: blocked", output,
       });
       finalizeDrainingPause(runId);
       return blocked;
     }
     if (fixStatus === "retry") {
-      return retryWithFeedback(step, context["reason"] || "Fix step reported STATUS: retry");
+      return retryWithFeedback(step, parsed["reason"] || "Fix step reported STATUS: retry");
     }
     const fixResult = completeFixStep({ ...step, invoked_by: step.invoked_by }, output);
     finalizeDrainingPause(runId);
@@ -1399,10 +1399,10 @@ export function completeStep(stepId: string, output: string): { status: string; 
     if (reported.malformed) {
       return retryWithFeedback(step, "FINDINGS_JSON could not be parsed. Emit a single-line JSON array after 'FINDINGS_JSON: '.");
     }
-    const statusValue = context["status"]?.toLowerCase();
+    const statusValue = parsed["status"]?.toLowerCase();
     const settlement = settleGate(step, fixPolicy, {
       failed: statusValue === "retry",
-      blockedReason: statusValue === "blocked" ? (context["reason"] || "Step reported STATUS: blocked") : undefined,
+      blockedReason: statusValue === "blocked" ? (parsed["reason"] || "Step reported STATUS: blocked") : undefined,
       findings: reported.findings,
       output,
     });
