@@ -11,6 +11,7 @@ import {
   recordReadOnlyBaseline,
   enforceReadOnly,
 } from "../../dist/installer/read-only.js";
+import { claimStep, completeStep, failStep } from "../../dist/installer/step-ops.js";
 import { listFindings } from "../../dist/installer/findings.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
@@ -370,5 +371,39 @@ describe("enforceReadOnly", () => {
   it("ignores coding roles even when the worktree changed", () => {
     fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
     assert.equal(enforceReadOnly(stepRow("s-dev"), "STATUS: done"), null);
+  });
+});
+
+describe("read-only enforcement through the step lifecycle", () => {
+  let home: TempTamanduaHome;
+  let repo: string;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-read-only-ops-");
+    repo = path.join(home.dir, "worktree");
+    fs.mkdirSync(repo);
+    initRepo(repo);
+    seedRun(getDb(), { id: "run-1", context: { repo } }, [
+      { id: "s-review", stepId: "gate-review", index: 0, status: "pending", agentId: "wf_reviewer", agentRole: "verification" },
+      { id: "s-next", stepId: "pr", index: 1, status: "waiting" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("snapshots at claim and blocks at complete when the verifier wrote a file", () => {
+    const claim = claimStep("wf_reviewer", "run-1");
+    assert.equal(claim.found, true);
+    fs.writeFileSync(path.join(repo, "sneaky.txt"), "x\n");
+    const result = completeStep(claim.stepId!, "STATUS: done");
+    assert.equal(result.status, "blocked");
+    assert.equal(fs.existsSync(path.join(repo, "sneaky.txt")), false);
+    const next = getDb().prepare("SELECT status FROM steps WHERE id = 's-next'").get() as { status: string };
+    assert.equal(next.status, "waiting");
+  });
+
+  it("also blocks when the verifier fails the step after writing", async () => {
+    const claim = claimStep("wf_reviewer", "run-1");
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
+    const result = await failStep(claim.stepId!, "gave up");
+    assert.equal(result.status, "blocked");
   });
 });

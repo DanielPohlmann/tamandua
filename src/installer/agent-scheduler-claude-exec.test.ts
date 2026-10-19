@@ -105,4 +105,20 @@ describe("runClaude", () => {
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("passes --disallowedTools when tools are restricted", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tam-claude-run-"));
+    const argsLog = path.join(dir, "args.log");
+    const bin = path.join(dir, "claude");
+    makeMockBinary(bin, `echo "$@" >> "${argsLog}"; printf '{"type":"result","result":"ok"}'`);
+    process.env.TAMANDUA_CLAUDE_BINARY = bin;
+
+    await runClaude("PROMPT", { timeout: 30, workdir: dir, disallowedTools: ["Edit", "Write", "NotebookEdit"] });
+    assert.ok(fs.readFileSync(argsLog, "utf-8").includes("--disallowedTools Edit,Write,NotebookEdit"));
+
+    fs.writeFileSync(argsLog, "");
+    await runClaude("PROMPT", { timeout: 30, workdir: dir, disallowedTools: [] });
+    assert.ok(!fs.readFileSync(argsLog, "utf-8").includes("--disallowedTools"));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });

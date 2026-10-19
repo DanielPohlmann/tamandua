@@ -24,6 +24,7 @@ import {
   tailLines,
 } from "./gate-loop.js";
 import { parseFindingsJson } from "./findings.js";
+import { enforceReadOnly, recordReadOnlyBaseline } from "./read-only.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Key-Value Parsing
@@ -1095,6 +1096,8 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
     ...(workerOwnership ? [workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [step.id])
   );
   if ((claim.changes ?? 0) <= 0) return { found: false };
+  const roleRow = db.prepare("SELECT agent_role FROM steps WHERE id = ?").get(step.id) as { agent_role: string | null };
+  recordReadOnlyBaseline(step.id, roleRow.agent_role, context["repo"]);
   emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: getWorkflowId(step.run_id), stepId: step.step_id, agentId });
   logger.info(`Step claimed by ${agentId}`, { runId: step.run_id, stepId: step.step_id });
 
@@ -1240,11 +1243,12 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, expects, input_template, on_fail, invoked_by, fix_rounds FROM steps WHERE id = ?"
+    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, expects, input_template, on_fail, invoked_by, fix_rounds, agent_role, worktree_baseline FROM steps WHERE id = ?"
   ).get(stepId) as {
     id: string; run_id: string; step_id: string; step_index: number; type: string;
     loop_config: string | null; current_story_id: string | null; expects: string;
     input_template: string | null; on_fail: string | null; invoked_by: string | null; fix_rounds: number;
+    agent_role: string | null; worktree_baseline: string | null;
   } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
@@ -1254,6 +1258,12 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const runCheck = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
   if (runCheck?.status === "failed" || runCheck?.status === "canceled") {
     return { status: "blocked" };
+  }
+
+  const readOnlyViolation = enforceReadOnly(step, output);
+  if (readOnlyViolation) {
+    finalizeDrainingPause(runId);
+    return readOnlyViolation;
   }
 
   // Validate output against the expects column before accepting the step
@@ -1824,8 +1834,12 @@ export async function failStep(stepId: string, error: string): Promise<{ status:
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT run_id, step_id, retry_count, max_retries, type, current_story_id FROM steps WHERE id = ?"
+    "SELECT id, run_id, step_id, retry_count, max_retries, type, current_story_id, agent_role, worktree_baseline, fix_rounds FROM steps WHERE id = ?"
   ).get(stepId) as {
+    id: string;
+    agent_role: string | null;
+    worktree_baseline: string | null;
+    fix_rounds: number;
     run_id: string;
     step_id: string;
     retry_count: number;
@@ -1835,6 +1849,12 @@ export async function failStep(stepId: string, error: string): Promise<{ status:
   } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
+
+  const readOnlyViolation = enforceReadOnly(step, error);
+  if (readOnlyViolation) {
+    finalizeDrainingPause(step.run_id);
+    return readOnlyViolation;
+  }
 
   // Loop step failure — per-story retry
   if (step.type === "loop" && step.current_story_id) {

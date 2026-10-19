@@ -10,6 +10,7 @@ import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
 import { emitEvent } from "./events.js";
+import { claudeDisallowedTools } from "./read-only.js";
 import { parsePiOutputStream } from "./pi-stream-parser.js";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -223,6 +224,8 @@ export interface RunPiOptions {
   env?: Record<string, string>;
   /** Optional model passed to `claude --model` (claude harness only). */
   model?: string;
+  /** Claude tools denied to this invocation (claude harness only). */
+  disallowedTools?: string[];
   /**
    * Optional callback invoked once the child process is spawned. Used by
    * `executePollingRound` to register the child + pgid in `inFlightChildren`
@@ -665,6 +668,9 @@ export async function runClaude(
   ];
   if (options.model && options.model !== "default") {
     args.push("--model", options.model);
+  }
+  if (options.disallowedTools && options.disallowedTools.length > 0) {
+    args.push("--disallowedTools", options.disallowedTools.join(","));
   }
 
   const preview = formatPiCommandPreview(claudePath, args);
@@ -1710,6 +1716,7 @@ export async function executePollingRound(
         timeout,
         workdir: workingDirectoryForHarness,
         model: claudeModel,
+        disallowedTools: claudeDisallowedTools(role),
         env: {
           TAMANDUA_WORKER_JOB_ID: job.id,
           TAMANDUA_WORKER_PID: String(process.pid),
