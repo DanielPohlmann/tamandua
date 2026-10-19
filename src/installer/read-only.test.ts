@@ -130,13 +130,15 @@ describe("enforceReadOnly", () => {
     fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
     git("add", "a.txt");
     git("commit", "-qm", "a");
+    fs.writeFileSync(path.join(repo, "a.txt"), "a-staged\n");
+    git("add", "a.txt");
     claim();
     fs.writeFileSync(path.join(repo, name), "g\n");
-    git("add", name);
+    git("add", "--", name);
     assert.equal(violation()?.status, "blocked");
-    assert.equal(read("a.txt"), "a\n");
+    assert.equal(read("a.txt"), "a-staged\n");
+    assert.equal(git("show", ":a.txt"), "a-staged\n");
     assert.equal(fs.existsSync(path.join(repo, name)), false);
-    assert.equal(git("status", "--porcelain").includes("a.txt"), false);
     assert.equal(fs.readFileSync(path.join(quarantineDir(), name), "utf-8"), "g\n");
   });
 
@@ -193,8 +195,20 @@ describe("enforceReadOnly", () => {
     assert.equal(git("show", ":tracked.txt"), "staged\n");
   });
 
-  it("blocks without resetting anything when HEAD moved", () => {
-    claim();
+  const ref = "refs/tamandua/baseline/s-review";
+  const refExists = () => {
+    try {
+      git("rev-parse", "--verify", "-q", ref);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("blocks without resetting anything when HEAD moved, keeping the baseline ref for recovery", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    const stash = git("rev-parse", ref).trim();
     fs.writeFileSync(path.join(repo, "tracked.txt"), "committed by step\n");
     git("commit", "-qam", "step commit");
     const moved = git("rev-parse", "HEAD").trim();
@@ -203,6 +217,97 @@ describe("enforceReadOnly", () => {
     assert.equal(read("tracked.txt"), "committed by step\n");
     const [finding] = listFindings("run-1");
     assert.match(finding.evidence, /HEAD moved from [0-9a-f]{40} to [0-9a-f]{40}/);
+    assert.ok(finding.evidence.includes(stash));
+    assert.ok(finding.evidence.includes(ref));
+    assert.equal(refExists(), true);
+  });
+
+  it("keeps the baseline ref and names it when the worktree cannot be read", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    fs.writeFileSync(path.join(repo, ".git", "index.lock"), "");
+    assert.equal(violation()?.status, "blocked");
+    const [finding] = listFindings("run-1");
+    assert.ok(finding.evidence.includes(ref));
+    assert.equal(refExists(), true);
+  });
+
+  it("does not block on baselines recorded without a HEAD sha", () => {
+    claim();
+    const row = stepRow("s-review") as { worktree_baseline: string };
+    const { head: _head, ...legacy } = JSON.parse(row.worktree_baseline);
+    getDb().prepare("UPDATE steps SET worktree_baseline = ? WHERE id = 's-review'").run(JSON.stringify(legacy));
+    fs.writeFileSync(path.join(repo, "other.txt"), "o\n");
+    git("add", "other.txt");
+    git("commit", "-qm", "moved");
+    assert.equal(violation(), null);
+  });
+
+  it("drops the baseline ref on an unparseable baseline and still stores the baseline when pinning fails", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    assert.equal(refExists(), true);
+    getDb().prepare("UPDATE steps SET worktree_baseline = 'garbage' WHERE id = 's-review'").run();
+    assert.equal(violation(), null);
+    assert.equal(refExists(), false);
+
+    fs.rmSync(path.join(repo, ".git", "refs", "tamandua"), { recursive: true, force: true });
+    fs.writeFileSync(path.join(repo, ".git", "refs", "tamandua"), "not a directory");
+    getDb().prepare("UPDATE steps SET worktree_baseline = NULL WHERE id = 's-review'").run();
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    assert.notEqual((stepRow("s-review") as { worktree_baseline: string | null }).worktree_baseline, null);
+  });
+
+  it("does not report a second, misleading violation when recording the HEAD-moved block throws", () => {
+    claim();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "committed\n");
+    git("commit", "-qam", "step commit");
+    getDb().exec("CREATE TRIGGER fail_block BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'boom'); END");
+    assert.throws(() => violation(), /boom/);
+    assert.equal(listFindings("run-1").length, 1);
+  });
+
+  it("quarantines under the common git dir so it survives removing a linked worktree", () => {
+    const linked = path.join(home.dir, "linked");
+    git("worktree", "add", "-q", "-b", "side", linked);
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ repo: linked }));
+    getDb().prepare("UPDATE steps SET worktree_baseline = ? WHERE id = 's-review'").run(snapshotWorktree(linked));
+    fs.writeFileSync(path.join(linked, "created.txt"), "keep me\n");
+    assert.equal(violation()?.status, "blocked");
+    const kept = path.join(repo, ".git", "tamandua-quarantine", "run-1", "s-review", "created.txt");
+    assert.equal(fs.readFileSync(kept, "utf-8"), "keep me\n");
+    git("worktree", "remove", "--force", linked);
+    assert.equal(fs.readFileSync(kept, "utf-8"), "keep me\n");
+  });
+
+  it("refuses to write through a symlinked ancestor directory", () => {
+    const outside = path.join(home.dir, "outside");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "outside content\n");
+    fs.mkdirSync(path.join(repo, "sub"));
+    fs.writeFileSync(path.join(repo, "sub", "keep.txt"), "baseline\n");
+    claim();
+    fs.rmSync(path.join(repo, "sub"), { recursive: true });
+    fs.symlinkSync(outside, path.join(repo, "sub"), process.platform === "win32" ? "junction" : "dir");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf-8"), "outside content\n");
+    const [finding] = listFindings("run-1");
+    assert.match(finding.evidence, /unsafe path/);
+  });
+
+  it("quarantines a dangling symlink the step created", (t) => {
+    claim();
+    try {
+      fs.symlinkSync("does-not-exist", path.join(repo, "dangling"), "file");
+    } catch {
+      t.skip("symlinks not permitted on this machine");
+      return;
+    }
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(fs.lstatSync(path.join(quarantineDir(), "dangling")).isSymbolicLink(), true);
+    assert.throws(() => fs.lstatSync(path.join(repo, "dangling")));
+    const [finding] = listFindings("run-1");
+    assert.match(finding.evidence, /dangling/);
   });
 
   it("pins the baseline stash at claim time and drops the ref after enforcement", () => {

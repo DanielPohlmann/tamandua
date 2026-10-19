@@ -108,8 +108,9 @@ function hashFiles(cwd: string, files: string[]): Record<string, string> {
 function currentHead(cwd: string): string {
   try {
     return git(cwd, ["rev-parse", "--verify", "-q", "HEAD"], { timeout: 30_000 }).trim();
-  } catch {
-    return "";
+  } catch (err) {
+    if ((err as { status?: number }).status === 1) return "";
+    throw err;
   }
 }
 
@@ -143,23 +144,57 @@ function violatingPaths(baseline: WorktreeSnapshot, current: WorktreeSnapshot): 
 }
 
 function quarantineRootOf(cwd: string, runId: string, stepDbId: string): string {
-  const gitDir = git(cwd, ["rev-parse", "--git-dir"], { timeout: 30_000 }).trim();
-  return path.join(path.resolve(cwd, gitDir), QUARANTINE_DIR, runId, stepDbId);
+  const commonDir = git(cwd, ["rev-parse", "--git-common-dir"], { timeout: 30_000 }).trim();
+  return path.join(path.resolve(cwd, commonDir), QUARANTINE_DIR, runId, stepDbId);
+}
+
+function quarantineBaseOf(quarantineRoot: string): string {
+  return path.resolve(quarantineRoot, "..", "..", "..");
+}
+
+function lstatOrNull(target: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(target);
+  } catch {
+    return null;
+  }
+}
+
+/** Refuses targets that reach outside `base` through a symlinked ancestor. */
+function assertInside(base: string, target: string): void {
+  const relative = path.relative(base, path.dirname(target));
+  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`unsafe path outside ${base}: ${target}`);
+  let probe = base;
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    probe = path.join(probe, part);
+    const stat = lstatOrNull(probe);
+    if (!stat) break;
+    if (stat.isSymbolicLink()) throw new Error(`unsafe path through symlink ${probe}`);
+  }
+  let existing = path.dirname(target);
+  while (!lstatOrNull(existing) && existing !== path.dirname(existing)) existing = path.dirname(existing);
+  const inside = path.relative(fs.realpathSync(base), fs.realpathSync(existing));
+  if (inside.startsWith("..") || path.isAbsolute(inside)) throw new Error(`unsafe path outside ${base}: ${target}`);
 }
 
 class Quarantine {
   readonly saved: string[] = [];
-  constructor(private readonly cwd: string, readonly root: string) {}
+  private readonly base: string;
+  constructor(private readonly cwd: string, readonly root: string) {
+    this.base = quarantineBaseOf(root);
+  }
 
   private destinationFor(file: string): string {
     const dest = path.join(this.root, file);
-    return fs.existsSync(dest) ? `${dest}.${Date.now()}` : dest;
+    assertInside(this.base, dest);
+    return lstatOrNull(dest) ? `${dest}.${Date.now()}` : dest;
   }
 
   /** Moves the step's version of a path out of the worktree; nothing is deleted. */
   move(file: string): void {
     const source = path.join(this.cwd, file);
-    if (!fs.existsSync(source)) return;
+    if (!lstatOrNull(source)) return;
+    assertInside(this.cwd, source);
     const dest = this.destinationFor(file);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.renameSync(source, dest);
@@ -169,11 +204,8 @@ class Quarantine {
   /** Keeps a copy of the step's version before the path is overwritten. */
   copy(file: string): void {
     const source = path.join(this.cwd, file);
-    try {
-      if (!fs.lstatSync(source).isFile()) return;
-    } catch {
-      return;
-    }
+    if (!lstatOrNull(source)?.isFile()) return;
+    assertInside(this.cwd, source);
     const dest = this.destinationFor(file);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(source, dest);
@@ -184,7 +216,8 @@ class Quarantine {
 function restoreUntracked(cwd: string, file: string, hash: string, quarantine: Quarantine): void {
   const blob = gitBuffer(cwd, ["cat-file", "blob", hash]);
   const target = path.join(cwd, file);
-  if (fs.existsSync(target) && fs.readFileSync(target).equals(blob)) return;
+  assertInside(cwd, target);
+  if (lstatOrNull(target)?.isFile() && fs.readFileSync(target).equals(blob)) return;
   quarantine.move(file);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, blob);
@@ -269,16 +302,26 @@ export function recordReadOnlyBaseline(stepDbId: string, role: string | null, wo
   if (!isReadOnlyRole(role) || !worktree) return;
   try {
     const snapshot = takeSnapshot(worktree);
-    if (snapshot.stash) git(worktree, ["update-ref", `${BASELINE_REF_PREFIX}${stepDbId}`, snapshot.stash]);
     getDb().prepare("UPDATE steps SET worktree_baseline = ? WHERE id = ?").run(JSON.stringify(snapshot), stepDbId);
+    if (snapshot.stash) {
+      try {
+        git(worktree, ["update-ref", baselineRef(stepDbId), snapshot.stash]);
+      } catch (err) {
+        logger.warn("Could not pin read-only baseline", { stepDbId, error: String(err) });
+      }
+    }
   } catch (err) {
     logger.warn("Read-only baseline unavailable", { stepDbId, error: String(err) });
   }
 }
 
+function baselineRef(stepDbId: string): string {
+  return `${BASELINE_REF_PREFIX}${stepDbId}`;
+}
+
 function dropBaselineRef(worktree: string, stepDbId: string): void {
   try {
-    git(worktree, ["update-ref", "-d", `${BASELINE_REF_PREFIX}${stepDbId}`], { timeout: 30_000 });
+    git(worktree, ["update-ref", "-d", baselineRef(stepDbId)], { timeout: 30_000 });
   } catch (err) {
     logger.warn("Could not drop read-only baseline ref", { stepDbId, error: String(err) });
   }
@@ -311,30 +354,48 @@ export function enforceReadOnly(
   if (!isReadOnlyRole(step.agent_role) || step.worktree_baseline === null) return null;
   const worktree = worktreeOf(step.run_id);
   if (!worktree) return null;
-  const baseline = parseSnapshot(step.worktree_baseline);
-  if (!baseline) return null;
+  let keepRef = false;
 
   try {
+    const baseline = parseSnapshot(step.worktree_baseline);
+    if (!baseline) return null;
     const header = `Read-only step "${step.step_id}" (role ${step.agent_role}) modified the worktree`;
-    let currentJson: string;
-    let changed: string[];
+    const recovery = baseline.stash
+      ? [`Recover the claim-time state from ${baseline.stash} (pinned as ${baselineRef(step.id)}), e.g. git checkout ${baseline.stash} -- <path>.`]
+      : [];
+
+    let head = "";
+    let currentJson = "";
+    let changed: string[] = [];
+    let unreadable: string | null = null;
+    const headMoved = () => typeof baseline.head === "string" && head !== baseline.head;
     try {
-      const head = currentHead(worktree);
-      if (head !== baseline.head) {
-        return violation(step, [
-          `${header}: HEAD moved from ${baseline.head || "(none)"} to ${head || "(none)"}.`,
-          "Nothing was reset or discarded automatically; a human must review the branch.",
-        ], output);
+      head = currentHead(worktree);
+      if (!headMoved()) {
+        currentJson = snapshotWorktree(worktree);
+        changed = violatingPaths(baseline, JSON.parse(currentJson) as WorktreeSnapshot);
       }
-      currentJson = snapshotWorktree(worktree);
-      changed = violatingPaths(baseline, JSON.parse(currentJson) as WorktreeSnapshot);
-      if (changed.length === 0) return null;
     } catch (err) {
+      unreadable = String(err).split(NEWLINE)[0];
+    }
+
+    if (unreadable !== null) {
+      keepRef = true;
       return violation(step, [
-        `${header}, or the worktree state could not be read (${String(err).split(NEWLINE)[0]}).`,
+        `${header}, or the worktree state could not be read (${unreadable}).`,
         "Nothing was discarded; inspect the worktree manually.",
+        ...recovery,
       ], output);
     }
+    if (headMoved()) {
+      keepRef = true;
+      return violation(step, [
+        `${header}: HEAD moved from ${baseline.head || "(none)"} to ${head || "(none)"}.`,
+        "Nothing was reset or discarded automatically; a human must review the branch.",
+        ...recovery,
+      ], output);
+    }
+    if (changed.length === 0) return null;
 
     let result: DiscardResult;
     try {
@@ -351,6 +412,6 @@ export function enforceReadOnly(
       ...(result.failures.length ? ["Could not restore:", ...result.failures] : []),
     ], output);
   } finally {
-    dropBaselineRef(worktree, step.id);
+    if (!keepRef) dropBaselineRef(worktree, step.id);
   }
 }
