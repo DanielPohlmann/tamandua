@@ -168,4 +168,159 @@ steps: []
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  async function expectRejected(yml: string, pattern: RegExp): Promise<void> {
+    const dir = withWorkflow(yml);
+    try {
+      await assert.rejects(loadWorkflowSpec(dir), pattern);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  async function expectLoaded(yml: string) {
+    const dir = withWorkflow(yml);
+    try {
+      return await loadWorkflowSpec(dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("rejects a loop step as fix step", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: gate
+    type: bash
+    run: "true"
+    on_fail: { fix_step: looper }
+  - id: looper
+    agent: dev
+    type: loop
+    loop: { over: stories, completion: all_done }
+    input: x
+    expects: y
+`,
+      /fix step "looper" must be a single agent step/,
+    );
+  });
+
+  it("rejects a fix step that declares its own fix_step", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: gate
+    type: bash
+    run: "true"
+    on_fail: { fix_step: fix }
+  - id: fix
+    agent: dev
+    input: x
+    expects: y
+    on_fail: { fix_step: gate }
+`,
+      /fix step "fix" must be a single agent step/,
+    );
+  });
+
+  it("rejects a fix_step that points at the step itself", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: gate
+    agent: dev
+    input: x
+    expects: y
+    on_fail: { fix_step: gate }
+`,
+      /fix_step cannot point at the step itself/,
+    );
+  });
+
+  it("loads a valid earlier return_step unchanged", async () => {
+    const spec = await expectLoaded(`id: wf
+${AGENTS}
+steps:
+  - id: gate-ci-local
+    type: bash
+    run: "true"
+  - id: pr
+    agent: dev
+    input: x
+    expects: y
+    on_fail: { fix_step: fix, max_rounds: 3, return_step: gate-ci-local }
+  - id: fix
+    agent: dev
+    input: x
+    expects: y
+`);
+    assert.deepEqual(spec.steps[1].on_fail, { fix_step: "fix", max_rounds: 3, return_step: "gate-ci-local" });
+    assert.equal(spec.steps[0].agent, "bash-runner");
+  });
+
+  it("rejects an unknown return_step", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: pr
+    agent: dev
+    input: x
+    expects: y
+    on_fail: { fix_step: fix, return_step: ghost }
+  - id: fix
+    agent: dev
+    input: x
+    expects: y
+`,
+      /return_step "ghost" must name an earlier step/,
+    );
+  });
+
+  it("loads valid budgets", async () => {
+    const spec = await expectLoaded(`id: wf
+budgets: { max_fix_rounds: 4, max_tokens: 200000 }
+${AGENTS}
+steps:
+  - id: s
+    agent: dev
+    input: x
+    expects: y
+`);
+    assert.deepEqual(spec.budgets, { max_fix_rounds: 4, max_tokens: 200000 });
+  });
+
+  it("rejects non-mapping budgets", async () => {
+    await expectRejected(
+      `id: wf
+budgets: nope
+${AGENTS}
+steps:
+  - id: s
+    agent: dev
+    input: x
+    expects: y
+`,
+      /budgets must be a mapping/,
+    );
+  });
+
+  it("rejects invalid max_tokens", async () => {
+    await expectRejected(
+      `id: wf
+budgets: { max_tokens: 1.5 }
+${AGENTS}
+steps:
+  - id: s
+    agent: dev
+    input: x
+    expects: y
+`,
+      /budgets.max_tokens must be a positive integer/,
+    );
+  });
 });
