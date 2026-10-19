@@ -9,7 +9,11 @@ import {
   runBashCommand,
   schedulableAgents,
   executeBashRound,
+  recoverStaleBashSteps,
+  bashRunnerAgent,
+  BASH_RUNNER_TIMEOUT_SECONDS,
 } from "../../dist/installer/bash-step.js";
+import { executePollingRound } from "../../dist/installer/agent-scheduler.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
 describe("buildBashEnv", () => {
@@ -288,5 +292,63 @@ describe("executeBashRound on a gated step", () => {
     assert.equal(state.run, "running");
     assert.equal(state.fix, "pending");
     assert.equal(state.fixRounds, 1);
+  });
+});
+
+describe("bash step recovery after a daemon crash", () => {
+  let home: TempTamanduaHome;
+  const JOB = () => ({ id: "job-1", runId: "run-1", agentId: "wf_bash-runner", workingDirectoryForHarness: home.dir });
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-bash-recovery-");
+    fs.writeFileSync(path.join(home.dir, "gate.mjs"), "console.log('ok'); process.exit(0);\n");
+    seedRun(getDb(), { id: "run-1" }, [
+      { id: "s-unit", stepId: "gate-unit", index: 0, status: "running", type: "bash", agentId: "wf_bash-runner", runCommand: "node gate.mjs" },
+      { id: "s-next", stepId: "next", index: 1, status: "waiting" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  function ageStep(seconds: number): void {
+    getDb().prepare(`UPDATE steps SET updated_at = datetime('now', '-${seconds} seconds') WHERE id = 's-unit'`).run();
+  }
+
+  function unitStep() {
+    return getDb().prepare("SELECT status, retry_count, claim_pgid FROM steps WHERE id = 's-unit'").get() as
+      { status: string; retry_count: number; claim_pgid: number | null };
+  }
+
+  it("resets a bash step left running past the timeout to pending", () => {
+    ageStep(BASH_RUNNER_TIMEOUT_SECONDS + 600);
+    const result = recoverStaleBashSteps(JOB(), BASH_RUNNER_TIMEOUT_SECONDS);
+    assert.equal(result.recovered, 1);
+    assert.equal(unitStep().status, "pending");
+    assert.equal(unitStep().retry_count, 1);
+  });
+
+  it("leaves a bash step that is still within its timeout alone", () => {
+    ageStep(60);
+    const result = recoverStaleBashSteps(JOB(), BASH_RUNNER_TIMEOUT_SECONDS);
+    assert.equal(result.recovered, 0);
+    assert.equal(unitStep().status, "running");
+  });
+
+  it("the bash branch of the polling round recovers the stale step and runs it again", async () => {
+    ageStep(BASH_RUNNER_TIMEOUT_SECONDS + 600);
+    const job = { ...JOB(), workflowId: "wf", intervalMinutes: 1, createdAt: new Date().toISOString() };
+    await executePollingRound(job as never, bashRunnerAgent());
+    assert.equal(unitStep().status, "done");
+    assert.equal(unitStep().retry_count, 1);
+    assert.equal((getDb().prepare("SELECT status FROM steps WHERE id = 's-next'").get() as { status: string }).status, "pending");
+  });
+
+  it("records the spawned process group on the claimed step", async () => {
+    getDb().prepare("UPDATE steps SET status = 'pending' WHERE id = 's-unit'").run();
+    await executeBashRound(JOB(), 30, {
+      run: async (_command, options) => {
+        options.onSpawn?.({ pid: 4242, pgid: 4242 });
+        return { exitCode: 0, output: "ok", timedOut: false };
+      },
+    });
+    assert.equal(unitStep().claim_pgid, 4242);
   });
 });

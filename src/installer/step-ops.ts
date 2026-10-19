@@ -1653,9 +1653,14 @@ export async function completeBashStep(
   blockedReason?: string,
 ): Promise<{ status: string; detail?: string }> {
   const db = getDb();
-  const step = db.prepare("SELECT id, run_id, step_id, on_fail, fix_rounds FROM steps WHERE id = ?").get(stepId) as
-    { id: string; run_id: string; step_id: string; on_fail: string | null; fix_rounds: number } | undefined;
+  const step = db.prepare("SELECT id, run_id, step_id, status, on_fail, fix_rounds FROM steps WHERE id = ?").get(stepId) as
+    { id: string; run_id: string; step_id: string; status: string; on_fail: string | null; fix_rounds: number } | undefined;
   if (!step) throw new Error(`Step not found: ${stepId}`);
+  if (step.status !== "running") {
+    // A recovered or re-claimed step must not absorb a result from an earlier attempt.
+    logger.warn("Ignoring bash result for a step that is no longer running", { runId: step.run_id, stepId: step.step_id, status: step.status });
+    return { status: "ignored", detail: `step is ${step.status}` };
+  }
   const run = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
   if (run?.status !== "running") return { status: "blocked" };
 

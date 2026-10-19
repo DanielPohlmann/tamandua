@@ -5,7 +5,7 @@ import path from "node:path";
 import { resolveTamanduaCli, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
 import { BASH_RUNNER_AGENT_ID } from "./types.js";
-import { executeBashRound, killProcessTree, schedulableAgents } from "./bash-step.js";
+import { executeBashRound, killProcessTree, recoverStaleBashSteps, schedulableAgents } from "./bash-step.js";
 import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
@@ -1609,6 +1609,10 @@ export async function executePollingRound(
 
   if (agent.id === BASH_RUNNER_AGENT_ID) {
     try {
+      const recovery = recoverStaleBashSteps(job, timeout);
+      if (recovery.recovered > 0 || recovery.failed > 0) {
+        logger.info("Stale bash claims recovered", { ...context, ...recovery });
+      }
       const outcome = await executeBashRound(job, timeout, {
         onSpawn: ({ pid, pgid }) => inFlightChildren.set(job.id, { pid, pgid, killed: false }),
       });

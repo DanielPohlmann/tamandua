@@ -115,6 +115,16 @@ describe("gate loop through step-ops", () => {
     assert.equal(result.status, "retrying");
   });
 
+  it("a late bash result for a step that is no longer running is ignored", async () => {
+    getDb().prepare("UPDATE steps SET status = 'pending' WHERE step_id = 'gate-unit'").run();
+    const result = await completeBashStep("s-unit", 1, "late failure");
+    assert.equal(result.status, "ignored");
+    assert.equal(status("gate-unit"), "pending");
+    assert.equal(status("fix"), "waiting");
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(context.gate_unit_output, undefined);
+  });
+
   it("an engine failure on a gated bash step blocks the run without a fix round", async () => {
     getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-unit'").run();
     const result = await completeBashStep("s-unit", 1, "<no output>", "engine error: spawn ENOENT");

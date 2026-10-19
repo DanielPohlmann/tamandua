@@ -3,13 +3,14 @@ import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { getDb } from "../db.js";
 import { logger } from "../lib/logger.js";
-import { claimStep, completeBashStep, resolveStepContext } from "./step-ops.js";
+import { claimStep, completeBashStep, recoverOrphanedStepsForAgent, resolveStepContext } from "./step-ops.js";
 import { BASH_ENV_KEYS_CONTEXT_KEY, BASH_RUNNER_AGENT_ID, type WorkflowAgent, type WorkflowSpec } from "./types.js";
 
 export const BASH_RUNNER_TIMEOUT_SECONDS = 3600;
 const MAX_OUTPUT_CHARS = 10 * 1024 * 1024;
 const MAX_ENV_VALUE_CHARS = 4096;
 const PIPE_GRACE_MS = 2000;
+const STALE_CLAIM_GRACE_SECONDS = 300;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PROTECTED_ENV_NAMES = new Set([
   "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "HOME", "USERPROFILE", "TEMP", "TMP", "SHELL",
@@ -178,6 +179,28 @@ export function schedulableAgents(workflow: WorkflowSpec): WorkflowAgent[] {
   return hasBashSteps ? [...workflow.agents, bashRunnerAgent()] : workflow.agents;
 }
 
+/**
+ * Re-queues bash steps of this run that a dead daemon left `running`. A live
+ * round is protected by the in-flight guard and finishes within the timeout,
+ * so anything older than timeout + grace has no owner. On POSIX the detached
+ * process group recorded at spawn is killed first; on Windows a PID may be
+ * reused by then, so taskkill /T is not risked.
+ */
+export function recoverStaleBashSteps(
+  job: { runId: string; agentId: string },
+  timeoutSeconds: number,
+): { recovered: number; failed: number; skipped: number } {
+  const staleThresholdMs = (timeoutSeconds + STALE_CLAIM_GRACE_SECONDS) * 1000;
+  if (process.platform !== "win32") {
+    const orphans = getDb().prepare(
+      `SELECT claim_pgid FROM steps WHERE agent_id = ? AND run_id = ? AND status = 'running' AND claim_pgid IS NOT NULL
+         AND (julianday('now') - julianday(updated_at)) * 86400000 > ?`,
+    ).all(job.agentId, job.runId, staleThresholdMs) as { claim_pgid: number }[];
+    for (const orphan of orphans) killProcessTree(orphan.claim_pgid);
+  }
+  return recoverOrphanedStepsForAgent(job.agentId, job.runId, staleThresholdMs);
+}
+
 export interface BashRoundHooks {
   onSpawn?: BashRunOptions["onSpawn"];
   run?: typeof runBashCommand;
@@ -222,7 +245,11 @@ export async function executeBashRound(
     }
 
     logger.info("bash step launched", { runId: job.runId, stepId: step.step_id, cwd });
-    const result = await run(step.run_command, { cwd, env: buildBashEnv(context), timeoutSeconds, onSpawn: hooks.onSpawn });
+    const onSpawn: BashRunOptions["onSpawn"] = (handle) => {
+      getDb().prepare("UPDATE steps SET claim_pgid = ? WHERE id = ?").run(handle.pgid, stepId);
+      hooks.onSpawn?.(handle);
+    };
+    const result = await run(step.run_command, { cwd, env: buildBashEnv(context), timeoutSeconds, onSpawn });
     logger.info("bash step finished", { runId: job.runId, stepId: step.step_id, exitCode: result.exitCode, timedOut: result.timedOut });
 
     await completeBashStep(stepId, result.exitCode, result.output, blockedReasonFor(result, timeoutSeconds));
