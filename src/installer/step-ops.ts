@@ -11,7 +11,7 @@ import { logger } from "../lib/logger.js";
 import { getMaxRoleTimeoutSeconds } from "./install.js";
 import { loadWorkflowSpec } from "./workflow-spec.js";
 import { isFrontendChange } from "../lib/frontend-detect.js";
-import type { LoopConfig, Story, WorkflowStepFailure } from "./types.js";
+import { BASH_ENV_KEYS_CONTEXT_KEY, type LoopConfig, type Story, type WorkflowStepFailure } from "./types.js";
 import { detectRugpull, relaunchRunAfterRugpull } from "./rugpull.js";
 import {
   EVIDENCE_LINES,
@@ -80,6 +80,7 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "worktree_origin_ref",
   "worktree_origin_sha",
   "original_branch",
+  BASH_ENV_KEYS_CONTEXT_KEY,
 ]);
 
 // ══════════════════════════════════════════════════════════════════════

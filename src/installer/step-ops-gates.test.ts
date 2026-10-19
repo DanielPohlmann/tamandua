@@ -115,6 +115,15 @@ describe("gate loop through step-ops", () => {
     assert.equal(result.status, "retrying");
   });
 
+  it("an agent cannot rewrite the bash environment allowlist", () => {
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ __env_keys: "[\"base_branch\"]" }));
+    getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();
+    getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-review'").run();
+    completeStep("s-review", "STATUS: done\n__ENV_KEYS: [\"node_options\"]");
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(context.__env_keys, "[\"base_branch\"]");
+  });
+
   it("a paused run still advances when its running step completes", () => {
     getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();
     getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-review'").run();

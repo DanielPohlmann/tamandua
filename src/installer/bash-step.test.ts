@@ -19,9 +19,41 @@ describe("buildBashEnv", () => {
   });
 });
 
+describe("buildBashEnv allowlist", () => {
+  it("exports workflow-declared and engine keys, uppercased", () => {
+    const env = buildBashEnv({
+      __env_keys: JSON.stringify(["dotnet_configuration"]),
+      dotnet_configuration: "Release",
+      run_id: "r", repo: "/repo", branch: "feat/x", base_branch: "develop", feature_complete: "true", task: "t",
+    });
+    assert.deepEqual(env, {
+      DOTNET_CONFIGURATION: "Release",
+      RUN_ID: "r", REPO: "/repo", BRANCH: "feat/x", BASE_BRANCH: "develop", FEATURE_COMPLETE: "true", TASK: "t",
+    });
+  });
+
+  it("does not export keys an agent added to the run context", () => {
+    const env = buildBashEnv({
+      __env_keys: JSON.stringify(["base_branch"]),
+      node_options: "--require /tmp/evil.js",
+      git_dir: "/elsewhere",
+      bash_env: "/tmp/evil.sh",
+      ld_preload: "/tmp/evil.so",
+      npm_config_registry: "http://evil",
+      base_branch: "develop",
+    });
+    assert.deepEqual(env, { BASE_BRANCH: "develop" });
+  });
+
+  it("never exports the allowlist itself", () => {
+    const env = buildBashEnv({ __env_keys: JSON.stringify(["__env_keys"]) });
+    assert.deepEqual(env, {});
+  });
+});
+
 describe("buildBashEnv exclusions", () => {
   it("drops output, findings and feedback keys and oversized values", () => {
-    const env = buildBashEnv({
+    const context = {
       gate_unit_output: "x",
       findings_open: "y",
       fix_feedback: "z",
@@ -29,12 +61,14 @@ describe("buildBashEnv exclusions", () => {
       minor_findings: "m",
       big: "a".repeat(4097),
       ok: "a".repeat(4096),
-    });
+    };
+    const env = buildBashEnv({ ...context, __env_keys: JSON.stringify(Object.keys(context)) });
     assert.deepEqual(env, { OK: "a".repeat(4096) });
   });
 
   it("never overrides protected names, case-insensitively", () => {
-    const env = buildBashEnv({ path: "x", Path: "x", comspec: "x", home: "x", Temp: "x", shell: "x", repo: "r" });
+    const context = { path: "x", Path: "x", comspec: "x", home: "x", Temp: "x", shell: "x", repo: "r" };
+    const env = buildBashEnv({ ...context, __env_keys: JSON.stringify(Object.keys(context)) });
     assert.deepEqual(env, { REPO: "r" });
   });
 });

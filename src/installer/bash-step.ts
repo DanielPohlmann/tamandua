@@ -3,7 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import { getDb } from "../db.js";
 import { logger } from "../lib/logger.js";
 import { claimStep, completeBashStep, resolveStepContext } from "./step-ops.js";
-import { BASH_RUNNER_AGENT_ID, type WorkflowAgent, type WorkflowSpec } from "./types.js";
+import { BASH_ENV_KEYS_CONTEXT_KEY, BASH_RUNNER_AGENT_ID, type WorkflowAgent, type WorkflowSpec } from "./types.js";
 
 export const BASH_RUNNER_TIMEOUT_SECONDS = 3600;
 const MAX_OUTPUT_CHARS = 10 * 1024 * 1024;
@@ -13,6 +13,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PROTECTED_ENV_NAMES = new Set([
   "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "HOME", "USERPROFILE", "TEMP", "TMP", "SHELL",
 ]);
+const ENGINE_ENV_KEYS = ["run_id", "repo", "branch", "base_branch", "feature_complete", "task"];
 
 export interface BashResult {
   exitCode: number;
@@ -39,10 +40,28 @@ function isExcludedFromEnv(key: string, value: string): boolean {
   );
 }
 
+function workflowDeclaredEnvKeys(context: Record<string, string>): string[] {
+  const raw = context[BASH_ENV_KEYS_CONTEXT_KEY];
+  if (!raw) return [];
+  try {
+    const keys: unknown = JSON.parse(raw);
+    return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Agents write arbitrary KEY: value lines into the run context, so only the
+ * keys the workflow declared plus the engine's own keys reach a gate's env.
+ */
 export function buildBashEnv(context: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, rawValue] of Object.entries(context)) {
-    const value = String(rawValue);
+  const allowed = new Set([...ENGINE_ENV_KEYS, ...workflowDeclaredEnvKeys(context)]);
+  allowed.delete(BASH_ENV_KEYS_CONTEXT_KEY);
+  for (const key of allowed) {
+    if (!Object.hasOwn(context, key)) continue;
+    const value = String(context[key]);
     if (!ENV_NAME.test(key) || isExcludedFromEnv(key, value)) continue;
     const name = key.toUpperCase();
     if (PROTECTED_ENV_NAMES.has(name)) continue;

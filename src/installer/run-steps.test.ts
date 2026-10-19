@@ -49,6 +49,7 @@ describe("insertRunSteps", () => {
     assert.equal(defaults.findings_gate_unit, "[]");
     assert.equal(defaults.gate_unit_output, "");
     assert.equal(defaults.minor_findings, "(none)");
+    assert.deepEqual(JSON.parse(defaults.__env_keys), ["base_branch"]);
   });
 });
 

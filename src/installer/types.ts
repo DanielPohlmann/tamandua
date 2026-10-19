@@ -36,6 +36,9 @@ export type PollingConfig = {
 
 export const BASH_RUNNER_AGENT_ID = "bash-runner";
 
+/** Run-context key holding the workflow-declared context keys that bash steps may see as env vars. */
+export const BASH_ENV_KEYS_CONTEXT_KEY = "__env_keys";
+
 export type WorkflowStepFailure = {
   retry_step?: string;
   max_retries?: number;

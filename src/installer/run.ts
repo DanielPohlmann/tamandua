@@ -24,7 +24,7 @@ import {
   serializeFixPolicy,
   type BudgetOverrides,
 } from "./gate-loop.js";
-import type { HarnessType, WorkflowSpec } from "./types.js";
+import { BASH_ENV_KEYS_CONTEXT_KEY, type HarnessType, type WorkflowSpec } from "./types.js";
 
 export interface RunWorkflowParams {
   workflowId: string;
@@ -66,8 +66,12 @@ export function buildEngineContextDefaults(workflow: WorkflowSpec): Record<strin
     defaults.minor_findings = "(none)";
     for (const step of gated) defaults[contextKeyFor("findings", step.id)] = "[]";
   }
-  for (const step of workflow.steps.filter((s) => s.type === "bash")) {
+  const bashSteps = workflow.steps.filter((s) => s.type === "bash");
+  for (const step of bashSteps) {
     defaults[bashOutputContextKey(step.id)] = "";
+  }
+  if (bashSteps.length > 0) {
+    defaults[BASH_ENV_KEYS_CONTEXT_KEY] = JSON.stringify(Object.keys(workflow.context ?? {}));
   }
   return defaults;
 }
