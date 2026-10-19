@@ -6,6 +6,7 @@ import os from "node:os";
 import {
   findClaudeBinary,
   runClaude,
+  buildClaudeArgs,
 } from "../../dist/installer/agent-scheduler.js";
 
 function makeMockBinary(binPath: string, behavior: string): void {
@@ -59,6 +60,24 @@ describe("findClaudeBinary", () => {
     process.env.PATH = dir;
     assert.throws(() => findClaudeBinary(), /claude binary not found in PATH/);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("buildClaudeArgs", () => {
+  it("omits --disallowedTools when none are given", () => {
+    assert.ok(!buildClaudeArgs("P", {}).includes("--disallowedTools"));
+    assert.ok(!buildClaudeArgs("P", { disallowedTools: [] }).includes("--disallowedTools"));
+  });
+
+  it("joins disallowed tools into one comma-separated value", () => {
+    const args = buildClaudeArgs("P", { disallowedTools: ["Edit", "Write", "NotebookEdit"] });
+    assert.ok(args.join(" ").includes("--disallowedTools Edit,Write,NotebookEdit"));
+  });
+
+  it("keeps the model flag behaviour", () => {
+    assert.ok(buildClaudeArgs("P", { model: "sonnet" }).join(" ").includes("--model sonnet"));
+    assert.ok(!buildClaudeArgs("P", { model: "default" }).includes("--model"));
+    assert.deepEqual(buildClaudeArgs("P", {}), ["-p", "P", "--output-format", "json", "--dangerously-skip-permissions"]);
   });
 });
 

@@ -1026,6 +1026,8 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
       ).run(
         ...(workerOwnership ? [nextStory.id, workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [nextStory.id, step.id])
       );
+      const loopRoleRow = db.prepare("SELECT agent_role FROM steps WHERE id = ?").get(step.id) as { agent_role: string | null };
+      recordReadOnlyBaseline(step.id, loopRoleRow.agent_role, context["repo"]);
 
       const wfId = getWorkflowId(step.run_id);
       emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: wfId, stepId: step.step_id, agentId });

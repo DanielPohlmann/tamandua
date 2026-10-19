@@ -400,6 +400,24 @@ describe("read-only enforcement through the step lifecycle", () => {
     assert.equal(next.status, "waiting");
   });
 
+  it("snapshots and blocks read-only loop/story steps too", () => {
+    const db = getDb();
+    db.prepare("UPDATE steps SET type = 'loop', loop_config = ? WHERE id = 's-review'").run(JSON.stringify({ over: "stories", completion: "all_done" }));
+    db.prepare(
+      "INSERT INTO stories (id, run_id, story_index, story_id, title, description, acceptance_criteria, status, retry_count, max_retries, created_at, updated_at) VALUES ('st-1', 'run-1', 0, 'US-1', 't', 'd', '[]', 'pending', 0, 4, datetime('now'), datetime('now'))",
+    ).run();
+    const claim = claimStep("wf_reviewer", "run-1");
+    assert.equal(claim.found, true);
+    const baseline = db.prepare("SELECT worktree_baseline FROM steps WHERE id = 's-review'").get() as { worktree_baseline: string | null };
+    assert.ok(baseline.worktree_baseline);
+    fs.writeFileSync(path.join(repo, "loop-sneaky.txt"), "x\n");
+    const result = completeStep(claim.stepId!, "STATUS: done");
+    assert.equal(result.status, "blocked");
+    assert.equal(fs.existsSync(path.join(repo, "loop-sneaky.txt")), false);
+    const quarantine = path.join(repo, ".git", "tamandua-quarantine", "run-1", "s-review", "loop-sneaky.txt");
+    assert.equal(fs.existsSync(quarantine), true);
+  });
+
   it("also blocks when the verifier fails the step after writing", async () => {
     const claim = claimStep("wf_reviewer", "run-1");
     fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");

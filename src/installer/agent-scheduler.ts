@@ -642,6 +642,24 @@ export async function runHermes(
 
 // ── Claude Code execution ─────────────────────────────────────────
 
+export function buildClaudeArgs(
+  prompt: string,
+  options: { model?: string; disallowedTools?: string[] },
+): string[] {
+  const args = [
+    "-p", prompt,
+    "--output-format", "json",
+    "--dangerously-skip-permissions",
+  ];
+  if (options.model && options.model !== "default") {
+    args.push("--model", options.model);
+  }
+  if (options.disallowedTools && options.disallowedTools.length > 0) {
+    args.push("--disallowedTools", options.disallowedTools.join(","));
+  }
+  return args;
+}
+
 export async function runClaude(
   prompt: string,
   options: RunPiOptions = {},
@@ -661,17 +679,7 @@ export async function runClaude(
   // --output-format json            single JSON result object (result + usage)
   // --dangerously-skip-permissions  no interactive prompts (background agent)
   // --model <m>                     only when a concrete model is requested
-  const args = [
-    "-p", prompt,
-    "--output-format", "json",
-    "--dangerously-skip-permissions",
-  ];
-  if (options.model && options.model !== "default") {
-    args.push("--model", options.model);
-  }
-  if (options.disallowedTools && options.disallowedTools.length > 0) {
-    args.push("--disallowedTools", options.disallowedTools.join(","));
-  }
+  const args = buildClaudeArgs(prompt, options);
 
   const preview = formatPiCommandPreview(claudePath, args);
   logger.info("claude pre-launch", {
