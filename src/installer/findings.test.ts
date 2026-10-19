@@ -95,8 +95,7 @@ Done.`,
     "bold key": `**FINDINGS_JSON:** ${json}`,
     "bold key colon outside": `**FINDINGS_JSON**: ${json}`,
     "indented key": `  FINDINGS_JSON: ${json}`,
-    "CRLF": ["STATUS: retry", `FINDINGS_JSON: ${json}`, "SUMMARY: x"].join("
-"),
+    "CRLF": ["STATUS: retry", `FINDINGS_JSON: ${json}`, "SUMMARY: x"].join(String.fromCharCode(13, 10)),
   };
   for (const [name, output] of Object.entries(cases)) {
     it(`parses with ${name}`, () => {
