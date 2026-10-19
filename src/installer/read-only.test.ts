@@ -83,6 +83,108 @@ describe("enforceReadOnly", () => {
     assert.equal(fs.existsSync(path.join(repo, "preexisting.txt")), true);
   });
 
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe", encoding: "utf-8" });
+  const read = (file: string) => fs.readFileSync(path.join(repo, file), "utf-8");
+  const claim = () =>
+    getDb().prepare("UPDATE steps SET worktree_baseline = ? WHERE id = 's-review'").run(snapshotWorktree(repo));
+  const violation = () => enforceReadOnly(stepRow("s-review"), "STATUS: done");
+
+  it("never removes a pre-existing untracked file that the step staged", () => {
+    claim();
+    git("add", "preexisting.txt");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("preexisting.txt"), "mine\n");
+    assert.match(git("status", "--porcelain", "--", "preexisting.txt"), /^\?\? /);
+  });
+
+  it("keeps a staged-new baseline file that the step modifies", () => {
+    fs.writeFileSync(path.join(repo, "staged.txt"), "s1\n");
+    git("add", "staged.txt");
+    claim();
+    fs.writeFileSync(path.join(repo, "staged.txt"), "s2\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("staged.txt"), "s1\n");
+  });
+
+  it("restores uncommitted pre-claim edits instead of HEAD when the step stages or deletes them", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "baseline edit\n");
+    claim();
+    git("add", "tracked.txt");
+    fs.rmSync(path.join(repo, "tracked.txt"));
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("tracked.txt"), "baseline edit\n");
+  });
+
+  it("detects further edits to a file that was already dirty at claim time", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "baseline edit\n");
+    claim();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "step edit\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("tracked.txt"), "baseline edit\n");
+  });
+
+  it("treats glob characters in file names literally", () => {
+    const name = process.platform === "win32" ? "[ab].txt" : "*";
+    fs.writeFileSync(path.join(repo, name), "g1\n");
+    fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+    git("add", name, "a.txt");
+    git("commit", "-qm", "globs");
+    fs.writeFileSync(path.join(repo, "a.txt"), "a-dirty\n");
+    claim();
+    fs.writeFileSync(path.join(repo, name), "g2\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read(name), "g1\n");
+    assert.equal(read("a.txt"), "a-dirty\n");
+  });
+
+  it("reverts files with unicode names", () => {
+    fs.writeFileSync(path.join(repo, "café.txt"), "c1\n");
+    git("add", "café.txt");
+    git("commit", "-qm", "unicode");
+    claim();
+    fs.writeFileSync(path.join(repo, "café.txt"), "c2\n");
+    fs.writeFileSync(path.join(repo, "naïve.txt"), "n\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("café.txt"), "c1\n");
+    assert.equal(fs.existsSync(path.join(repo, "naïve.txt")), false);
+  });
+
+  it("reverts a rename", () => {
+    claim();
+    git("mv", "tracked.txt", "renamed.txt");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("tracked.txt"), "v1\n");
+    assert.equal(fs.existsSync(path.join(repo, "renamed.txt")), false);
+  });
+
+  it("records the finding and blocks the run when a revert command fails", () => {
+    claim();
+    const row = stepRow("s-review") as { worktree_baseline: string };
+    const tampered = { ...JSON.parse(row.worktree_baseline), stash: "0123456789abcdef0123456789abcdef01234567" };
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
+    getDb().prepare("UPDATE steps SET worktree_baseline = ? WHERE id = 's-review'").run(JSON.stringify({
+      ...tampered, entries: { "tracked.txt": { line: " M", untracked: false, indexCode: " " } }, hashes: { "tracked.txt": "x" },
+    }));
+    assert.equal(violation()?.status, "blocked");
+    const [finding] = listFindings("run-1");
+    assert.equal(finding.rule, "gate/read-only-violation");
+    assert.match(finding.evidence, /Could not restore/);
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "blocked");
+  });
+
+  it("records the finding and blocks the run when the worktree cannot be read", () => {
+    claim();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
+    fs.writeFileSync(path.join(repo, ".git", "index.lock"), "");
+    assert.equal(violation()?.status, "blocked");
+    const [finding] = listFindings("run-1");
+    assert.equal(finding.rule, "gate/read-only-violation");
+    assert.match(finding.evidence, /Could not restore/);
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "blocked");
+  });
+
   it("ignores coding roles even when the worktree changed", () => {
     fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
     assert.equal(enforceReadOnly(stepRow("s-dev"), "STATUS: done"), null);

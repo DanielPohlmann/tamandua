@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { getDb } from "../db.js";
 import { logger } from "../lib/logger.js";
 import { ENGINE_FINDING_FILE, recordGateFindings } from "./findings.js";
@@ -16,44 +18,138 @@ export function claudeDisallowedTools(role: string | null | undefined): string[]
   return isReadOnlyRole(role) ? [...DISALLOWED_EDIT_TOOLS] : [];
 }
 
-function git(cwd: string, args: string[], timeout = 60_000): string {
-  return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: "pipe", timeout });
+function git(cwd: string, args: string[], options: { timeout?: number; input?: string } = {}): string {
+  return execFileSync("git", ["--literal-pathspecs", ...args], {
+    cwd,
+    encoding: "utf-8",
+    stdio: "pipe",
+    timeout: options.timeout ?? 60_000,
+    input: options.input,
+  });
+}
+
+interface StatusEntry {
+  line: string;
+  untracked: boolean;
+  indexCode: string;
+}
+
+interface WorktreeSnapshot {
+  stash: string;
+  entries: Record<string, StatusEntry>;
+  hashes: Record<string, string>;
+}
+
+const RENAMED_SOURCE = "R~";
+const NUL = String.fromCharCode(0);
+const NEWLINE = String.fromCharCode(10);
+
+function parseStatus(raw: string): Record<string, StatusEntry> {
+  const entries: Record<string, StatusEntry> = {};
+  const records = raw.split(NUL);
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (record.length < 4) continue;
+    const code = record.slice(0, 2);
+    const file = record.slice(3);
+    entries[file] = { line: code, untracked: code === "??", indexCode: code[0] };
+    if (code[0] === "R" || code[0] === "C") {
+      const source = records[++i];
+      if (source && code[0] === "R") entries[source] = { line: RENAMED_SOURCE, untracked: false, indexCode: "D" };
+    }
+  }
+  return entries;
+}
+
+function hashFiles(cwd: string, files: string[]): Record<string, string> {
+  const regular = files.filter((file) => {
+    try {
+      return fs.lstatSync(path.join(cwd, file)).isFile();
+    } catch {
+      return false;
+    }
+  });
+  const hashes: Record<string, string> = {};
+  if (regular.length === 0) return hashes;
+  const out = git(cwd, ["hash-object", "--no-filters", "--stdin-paths"], {
+    input: regular.join(NEWLINE) + NEWLINE,
+    timeout: 30_000,
+  });
+  out.split(NEWLINE).filter(Boolean).forEach((hash, i) => {
+    hashes[regular[i]] = hash.trim();
+  });
+  return hashes;
+}
+
+function takeSnapshot(cwd: string): WorktreeSnapshot {
+  const entries = parseStatus(git(cwd, ["status", "--porcelain=v1", "-z", "-uall"], { timeout: 30_000 }));
+  return {
+    stash: git(cwd, ["stash", "create"], { timeout: 30_000 }).trim(),
+    entries,
+    hashes: hashFiles(cwd, Object.keys(entries)),
+  };
 }
 
 export function snapshotWorktree(cwd: string): string {
-  return git(cwd, ["status", "--porcelain", "-uall"], 30_000);
+  return JSON.stringify(takeSnapshot(cwd));
 }
 
-interface ChangedPath {
-  untracked: boolean;
-  added: boolean;
-  path: string;
-}
-
-function unquote(p: string): string {
-  return p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p;
-}
-
-function changedSince(baseline: string, current: string): ChangedPath[] {
-  const known = new Set(baseline.split("\n"));
-  const changes: ChangedPath[] = [];
-  for (const line of current.split("\n")) {
-    if (!line || known.has(line)) continue;
-    const code = line.slice(0, 2);
-    const rest = line.slice(3);
-    const target = code.startsWith("R") || code.startsWith("C") ? rest.split(" -> ").pop()! : rest;
-    changes.push({ untracked: code === "??", added: code.startsWith("A"), path: unquote(target) });
+function parseSnapshot(json: string): WorktreeSnapshot | null {
+  try {
+    const parsed = JSON.parse(json) as WorktreeSnapshot;
+    return parsed && typeof parsed === "object" && parsed.entries ? parsed : null;
+  } catch {
+    return null;
   }
-  return changes;
 }
 
-/** Reverts only what changed since the baseline; pre-existing untracked files are never touched. */
-export function discardWorktreeChanges(cwd: string, baseline: string): void {
-  for (const change of changedSince(baseline, snapshotWorktree(cwd))) {
-    if (change.untracked) git(cwd, ["clean", "-fd", "--", change.path]);
-    else if (change.added) git(cwd, ["rm", "-rf", "--", change.path]);
-    else git(cwd, ["checkout", "HEAD", "--", change.path]);
+function violatingPaths(baseline: WorktreeSnapshot, current: WorktreeSnapshot): string[] {
+  const paths = new Set([...Object.keys(baseline.entries), ...Object.keys(current.entries)]);
+  return [...paths].filter((file) =>
+    baseline.entries[file]?.line !== current.entries[file]?.line || baseline.hashes[file] !== current.hashes[file]);
+}
+
+function revertPath(cwd: string, file: string, baseline: WorktreeSnapshot, current: WorktreeSnapshot): string | null {
+  const before = baseline.entries[file];
+  const now = current.entries[file];
+  const ref = baseline.stash || "HEAD";
+  const absolute = path.join(cwd, file);
+
+  if (!before) {
+    if (!now || now.untracked) fs.rmSync(absolute, { force: true, recursive: true });
+    else if (["A", "R", "C"].includes(now.indexCode)) git(cwd, ["rm", "-rf", "-q", "--", file]);
+    else git(cwd, ["checkout", ref, "--", file]);
+    return null;
   }
+  if (before.untracked) {
+    if (now && !now.untracked) git(cwd, ["reset", "-q", "--", file]);
+    return baseline.hashes[file] === current.hashes[file] ? null : `${file} (untracked before the step; content cannot be restored)`;
+  }
+  if (baseline.hashes[file] === undefined) {
+    fs.rmSync(absolute, { force: true });
+    git(cwd, ["reset", "-q", "--", file]);
+    return null;
+  }
+  git(cwd, ["checkout", ref, "--", file]);
+  if (before.line[0] === " ") git(cwd, ["reset", "-q", "--", file]);
+  return null;
+}
+
+/** Reverts only what differs from the baseline; returns the paths it could not restore. */
+export function discardWorktreeChanges(cwd: string, baselineJson: string, currentJson: string): string[] {
+  const baseline = parseSnapshot(baselineJson);
+  const current = parseSnapshot(currentJson);
+  if (!baseline || !current) return [];
+  const failures: string[] = [];
+  for (const file of violatingPaths(baseline, current)) {
+    try {
+      const problem = revertPath(cwd, file, baseline, current);
+      if (problem) failures.push(problem);
+    } catch (err) {
+      failures.push(`${file} (${String(err).split(NEWLINE)[0]})`);
+    }
+  }
+  return failures;
 }
 
 function worktreeOf(runId: string): string | undefined {
@@ -77,13 +173,25 @@ export function enforceReadOnly(
   if (!isReadOnlyRole(step.agent_role) || step.worktree_baseline === null) return null;
   const worktree = worktreeOf(step.run_id);
   if (!worktree) return null;
+  const baseline = parseSnapshot(step.worktree_baseline);
+  if (!baseline) return null;
 
-  const current = snapshotWorktree(worktree);
-  if (current === step.worktree_baseline) return null;
-
-  const changed = changedSince(step.worktree_baseline, current).map((c) => c.path).join("\n");
-  discardWorktreeChanges(worktree, step.worktree_baseline);
-  const evidence = `Read-only step "${step.step_id}" (role ${step.agent_role}) modified the worktree; changes were discarded:\n${changed}`;
+  let changed: string[];
+  let failures: string[];
+  try {
+    const currentJson = snapshotWorktree(worktree);
+    changed = violatingPaths(baseline, JSON.parse(currentJson) as WorktreeSnapshot);
+    if (changed.length === 0) return null;
+    failures = discardWorktreeChanges(worktree, step.worktree_baseline, currentJson);
+  } catch (err) {
+    changed = ["(worktree state unreadable)"];
+    failures = [`worktree (${String(err).split(NEWLINE)[0]})`];
+  }
+  const evidence = [
+    `Read-only step "${step.step_id}" (role ${step.agent_role}) modified the worktree; changes were discarded:`,
+    ...changed,
+    ...(failures.length ? ["Could not restore:", ...failures] : []),
+  ].join(NEWLINE);
   recordGateFindings({
     runId: step.run_id,
     gate: step.step_id,
