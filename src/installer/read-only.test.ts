@@ -8,6 +8,7 @@ import {
   isReadOnlyRole,
   claudeDisallowedTools,
   snapshotWorktree,
+  recordReadOnlyBaseline,
   enforceReadOnly,
 } from "../../dist/installer/read-only.js";
 import { listFindings } from "../../dist/installer/findings.js";
@@ -87,6 +88,7 @@ describe("enforceReadOnly", () => {
   const read = (file: string) => fs.readFileSync(path.join(repo, file), "utf-8");
   const claim = () =>
     getDb().prepare("UPDATE steps SET worktree_baseline = ? WHERE id = 's-review'").run(snapshotWorktree(repo));
+  const quarantineDir = () => path.join(repo, ".git", "tamandua-quarantine", "run-1", "s-review");
   const violation = () => enforceReadOnly(stepRow("s-review"), "STATUS: done");
 
   it("never removes a pre-existing untracked file that the step staged", () => {
@@ -125,16 +127,91 @@ describe("enforceReadOnly", () => {
 
   it("treats glob characters in file names literally", () => {
     const name = process.platform === "win32" ? "[ab].txt" : "*";
-    fs.writeFileSync(path.join(repo, name), "g1\n");
     fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
-    git("add", name, "a.txt");
-    git("commit", "-qm", "globs");
-    fs.writeFileSync(path.join(repo, "a.txt"), "a-dirty\n");
+    git("add", "a.txt");
+    git("commit", "-qm", "a");
     claim();
-    fs.writeFileSync(path.join(repo, name), "g2\n");
+    fs.writeFileSync(path.join(repo, name), "g\n");
+    git("add", name);
     assert.equal(violation()?.status, "blocked");
-    assert.equal(read(name), "g1\n");
-    assert.equal(read("a.txt"), "a-dirty\n");
+    assert.equal(read("a.txt"), "a\n");
+    assert.equal(fs.existsSync(path.join(repo, name)), false);
+    assert.equal(git("status", "--porcelain").includes("a.txt"), false);
+    assert.equal(fs.readFileSync(path.join(quarantineDir(), name), "utf-8"), "g\n");
+  });
+
+  it("restores a tracked file whose index entry was removed while the file stayed (D + ??)", () => {
+    claim();
+    git("rm", "--cached", "-q", "tracked.txt");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("tracked.txt"), "v1\n");
+    assert.equal(git("status", "--porcelain", "--", "tracked.txt"), "");
+  });
+
+  it("never loses an ignored file that the step force-added", () => {
+    fs.writeFileSync(path.join(repo, ".gitignore"), ".env\n");
+    git("add", ".gitignore");
+    git("commit", "-qm", "ignore");
+    fs.writeFileSync(path.join(repo, ".env"), "SECRET=1\n");
+    claim();
+    git("add", "-f", ".env");
+    assert.equal(violation()?.status, "blocked");
+    const survivors = [path.join(repo, ".env"), path.join(quarantineDir(), ".env")].filter(fs.existsSync);
+    assert.equal(survivors.length, 1);
+    assert.equal(fs.readFileSync(survivors[0], "utf-8"), "SECRET=1\n");
+    assert.equal(git("status", "--porcelain").includes(".env"), false);
+  });
+
+  it("keeps an untracked file when the step edits .gitignore to hide it", () => {
+    claim();
+    fs.writeFileSync(path.join(repo, ".gitignore"), "preexisting.txt\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("preexisting.txt"), "mine\n");
+    assert.equal(fs.existsSync(path.join(repo, ".gitignore")), false);
+    assert.equal(fs.readFileSync(path.join(quarantineDir(), ".gitignore"), "utf-8"), "preexisting.txt\n");
+  });
+
+  it("restores the baseline content of an untracked file and quarantines the step version", () => {
+    claim();
+    fs.writeFileSync(path.join(repo, "preexisting.txt"), "step version\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("preexisting.txt"), "mine\n");
+    assert.equal(fs.readFileSync(path.join(quarantineDir(), "preexisting.txt"), "utf-8"), "step version\n");
+    const [finding] = listFindings("run-1");
+    assert.match(finding.evidence, /tamandua-quarantine/);
+  });
+
+  it("restores both index and worktree of a baseline MM file", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "staged\n");
+    git("add", "tracked.txt");
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "worktree\n");
+    claim();
+    git("checkout", "HEAD", "--", "tracked.txt");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("tracked.txt"), "worktree\n");
+    assert.equal(git("status", "--porcelain", "--", "tracked.txt").slice(0, 2), "MM");
+    assert.equal(git("show", ":tracked.txt"), "staged\n");
+  });
+
+  it("blocks without resetting anything when HEAD moved", () => {
+    claim();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "committed by step\n");
+    git("commit", "-qam", "step commit");
+    const moved = git("rev-parse", "HEAD").trim();
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(git("rev-parse", "HEAD").trim(), moved);
+    assert.equal(read("tracked.txt"), "committed by step\n");
+    const [finding] = listFindings("run-1");
+    assert.match(finding.evidence, /HEAD moved from [0-9a-f]{40} to [0-9a-f]{40}/);
+  });
+
+  it("pins the baseline stash at claim time and drops the ref after enforcement", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    const ref = "refs/tamandua/baseline/s-review";
+    assert.match(git("rev-parse", "--verify", ref).trim(), /^[0-9a-f]{40}$/);
+    enforceReadOnly(stepRow("s-review"), "STATUS: done");
+    assert.throws(() => git("rev-parse", "--verify", "-q", ref));
   });
 
   it("reverts files with unicode names", () => {
@@ -180,7 +257,7 @@ describe("enforceReadOnly", () => {
     assert.equal(violation()?.status, "blocked");
     const [finding] = listFindings("run-1");
     assert.equal(finding.rule, "gate/read-only-violation");
-    assert.match(finding.evidence, /Could not restore/);
+    assert.match(finding.evidence, /Nothing was discarded/);
     const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
     assert.equal(run.status, "blocked");
   });
