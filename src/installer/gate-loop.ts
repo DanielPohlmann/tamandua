@@ -75,6 +75,25 @@ export function bashOutputContextKey(stepId: string): string {
   return `${stepId.replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}_output`;
 }
 
+let transactionDepth = 0;
+
+function inTransaction<T>(fn: () => T): T {
+  const db = getDb();
+  if (transactionDepth > 0) return fn();
+  db.exec("BEGIN IMMEDIATE");
+  transactionDepth++;
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    transactionDepth--;
+  }
+}
+
 export function mergeRunContext(runId: string, patch: Record<string, string>): void {
   const db = getDb();
   const row = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string } | undefined;
@@ -133,10 +152,12 @@ export function blockRunAtStep(params: {
   output: string;
 }): { status: "blocked"; detail: string } {
   const db = getDb();
-  db.prepare("UPDATE steps SET status = 'waiting', output = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(params.output, params.stepDbId);
-  mergeRunContext(params.runId, { blocked_step: params.stepName, blocked_reason: params.reason });
-  db.prepare("UPDATE runs SET status = 'blocked', updated_at = datetime('now') WHERE id = ?").run(params.runId);
+  inTransaction(() => {
+    db.prepare("UPDATE steps SET status = 'waiting', output = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(params.output, params.stepDbId);
+    mergeRunContext(params.runId, { blocked_step: params.stepName, blocked_reason: params.reason });
+    db.prepare("UPDATE runs SET status = 'blocked', updated_at = datetime('now') WHERE id = ?").run(params.runId);
+  });
   emitEvent({
     ts: new Date().toISOString(),
     event: "run.blocked",
@@ -163,12 +184,14 @@ function startFixRound(gate: GateStepRow, policy: FixPolicy, actionable: StoredF
     return blockRunAtStep({ runId: gate.run_id, stepDbId: gate.id, stepName: gate.step_id,
       reason: `Fix step "${policy.fix_step}" not found in run`, output });
   }
-  db.prepare("UPDATE steps SET status = 'waiting', output = ?, fix_rounds = fix_rounds + 1, updated_at = datetime('now') WHERE id = ?")
-    .run(output, gate.id);
-  db.prepare("UPDATE runs SET fix_rounds = fix_rounds + 1, updated_at = datetime('now') WHERE id = ?").run(gate.run_id);
-  mergeRunContext(gate.run_id, { fix_feedback: toFixFeedback(actionable), fix_origin: gate.step_id });
-  db.prepare("UPDATE steps SET status = 'pending', invoked_by = ?, retry_count = 0, output = NULL, updated_at = datetime('now') WHERE id = ?")
-    .run(gate.step_id, fixStep.id);
+  inTransaction(() => {
+    db.prepare("UPDATE steps SET status = 'waiting', output = ?, fix_rounds = fix_rounds + 1, updated_at = datetime('now') WHERE id = ?")
+      .run(output, gate.id);
+    db.prepare("UPDATE runs SET fix_rounds = fix_rounds + 1, updated_at = datetime('now') WHERE id = ?").run(gate.run_id);
+    mergeRunContext(gate.run_id, { fix_feedback: toFixFeedback(actionable), fix_origin: gate.step_id });
+    db.prepare("UPDATE steps SET status = 'pending', invoked_by = ?, retry_count = 0, output = NULL, updated_at = datetime('now') WHERE id = ?")
+      .run(gate.step_id, fixStep.id);
+  });
   const workflowId = workflowIdOf(gate.run_id);
   const detail = `${actionable.length} finding(s) sent to ${policy.fix_step} (round ${gate.fix_rounds + 1})`;
   emitEvent({ ts: new Date().toISOString(), event: "gate.failed", runId: gate.run_id, workflowId, stepId: gate.step_id, detail });
@@ -222,19 +245,25 @@ export function completeFixStep(
   output: string,
 ): { status: "advanced" } {
   const db = getDb();
-  applyFixReport(fixStep.run_id, { resolved: parseResolved(output), disputed: parseDisputed(output) });
-  publishFindingsContext(fixStep.run_id, fixStep.invoked_by);
+  const resumeAt = inTransaction(() => {
+    applyFixReport(fixStep.run_id, { resolved: parseResolved(output), disputed: parseDisputed(output) });
+    publishFindingsContext(fixStep.run_id, fixStep.invoked_by);
 
-  const origin = db.prepare("SELECT on_fail FROM steps WHERE run_id = ? AND step_id = ?").get(fixStep.run_id, fixStep.invoked_by) as
-    { on_fail: string | null } | undefined;
-  const policy = parseFixPolicy(origin?.on_fail ?? null);
-  const resumeAt = policy?.return_step ?? fixStep.invoked_by;
+    const origin = db.prepare("SELECT on_fail FROM steps WHERE run_id = ? AND step_id = ?").get(fixStep.run_id, fixStep.invoked_by) as
+      { on_fail: string | null } | undefined;
+    const policy = parseFixPolicy(origin?.on_fail ?? null);
+    const target = policy?.return_step ?? fixStep.invoked_by;
 
-  db.prepare("UPDATE steps SET status = 'waiting', output = ?, invoked_by = NULL, updated_at = datetime('now') WHERE id = ?")
-    .run(output, fixStep.id);
-  db.prepare("UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
-    .run(fixStep.run_id, resumeAt);
-  mergeRunContext(fixStep.run_id, { fix_feedback: "", fix_origin: "" });
+    db.prepare("UPDATE steps SET status = 'waiting', output = ?, invoked_by = NULL, updated_at = datetime('now') WHERE id = ?")
+      .run(output, fixStep.id);
+    const resumed = db.prepare("UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
+      .run(fixStep.run_id, target);
+    if (Number(resumed.changes) === 0) {
+      throw new Error(`Run ${fixStep.run_id} has no step "${target}" to resume after fix step "${fixStep.step_id}"`);
+    }
+    mergeRunContext(fixStep.run_id, { fix_feedback: "", fix_origin: "" });
+    return target;
+  });
 
   const workflowId = workflowIdOf(fixStep.run_id);
   emitEvent({ ts: new Date().toISOString(), event: "fix.done", runId: fixStep.run_id, workflowId, stepId: fixStep.step_id,
@@ -255,20 +284,23 @@ export function prepareBlockedRunResume(
   const stepId = context.blocked_step;
   if (!stepId) throw new Error(`Run ${runId} has no recorded blocked step`);
 
-  db.prepare("UPDATE steps SET status = 'pending', fix_rounds = 0, updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
-    .run(runId, stepId);
-  if (overrides.maxRounds !== undefined) {
-    db.prepare("UPDATE runs SET max_rounds_override = ? WHERE id = ?").run(overrides.maxRounds, runId);
-  }
-  if (overrides.maxFixRounds !== undefined) {
-    db.prepare("UPDATE runs SET max_fix_rounds = ? WHERE id = ?").run(overrides.maxFixRounds, runId);
-  }
-  delete context.blocked_step;
-  delete context.blocked_reason;
-  db.prepare(
-    `UPDATE runs SET status = 'running', context = ?, scheduling_status = 'pending_register',
-            scheduling_requested_at = ?, scheduling_error = NULL, updated_at = datetime('now') WHERE id = ?`,
-  ).run(JSON.stringify(context), new Date().toISOString(), runId);
+  inTransaction(() => {
+    const requeued = db.prepare("UPDATE steps SET status = 'pending', fix_rounds = 0, updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
+      .run(runId, stepId);
+    if (Number(requeued.changes) === 0) throw new Error(`Run ${runId} has no step "${stepId}" to resume`);
+    if (overrides.maxRounds !== undefined) {
+      db.prepare("UPDATE runs SET max_rounds_override = ? WHERE id = ?").run(overrides.maxRounds, runId);
+    }
+    if (overrides.maxFixRounds !== undefined) {
+      db.prepare("UPDATE runs SET max_fix_rounds = ? WHERE id = ?").run(overrides.maxFixRounds, runId);
+    }
+    delete context.blocked_step;
+    delete context.blocked_reason;
+    db.prepare(
+      `UPDATE runs SET status = 'running', context = ?, scheduling_status = 'pending_register',
+              scheduling_requested_at = ?, scheduling_error = NULL, updated_at = datetime('now') WHERE id = ?`,
+    ).run(JSON.stringify(context), new Date().toISOString(), runId);
+  });
   emitEvent({ ts: new Date().toISOString(), event: "run.resumed", runId, workflowId: run.workflow_id, stepId,
     detail: "Resumed after block" });
   return { stepId, workflowId: run.workflow_id };

@@ -190,3 +190,39 @@ describe("prepareBlockedRunResume", () => {
     assert.throws(() => prepareBlockedRunResume("run-1"), /is not blocked/);
   });
 });
+
+describe("atomic transitions", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-gate-atomic-");
+    seedRun(getDb(), { id: "run-1", maxFixRounds: 8 }, [
+      { id: "s-review", stepId: "gate-review", index: 0, status: "running", onFail: POLICY },
+      { id: "s-fix", stepId: "fix", index: 1, agentId: "wf_developer" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("rolls back a fix round that throws midway", () => {
+    getDb().prepare("UPDATE runs SET context = 'not json' WHERE id = 'run-1'").run();
+    assert.throws(() => settleGate(stepRow("gate-review"), POLICY, { failed: true, findings: [FINDING as never], output: "x" }));
+    assert.equal(stepRow("gate-review").status, "running");
+    assert.equal(stepRow("gate-review").fix_rounds, 0);
+    assert.equal(stepRow("fix").status, "waiting");
+    assert.equal(runRow().fix_rounds, 0);
+  });
+
+  it("refuses to resume a blocked run whose blocked step does not exist", () => {
+    getDb().prepare("UPDATE runs SET status = 'blocked', context = ? WHERE id = 'run-1'")
+      .run(JSON.stringify({ blocked_step: "ghost" }));
+    assert.throws(() => prepareBlockedRunResume("run-1"), /no step "ghost"/);
+    assert.equal(runRow().status, "blocked");
+  });
+
+  it("fails when the step to resume after a fix does not exist", () => {
+    assert.throws(
+      () => completeFixStep({ ...stepRow("fix"), invoked_by: "ghost" }, "STATUS: done"),
+      /no step "ghost"/,
+    );
+    assert.equal(stepRow("fix").status, "waiting");
+  });
+});
