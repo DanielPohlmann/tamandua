@@ -145,6 +145,46 @@ function migrate(db: DatabaseSync): void {
     db.exec("ALTER TABLE steps ADD COLUMN claim_updated_at TEXT");
   }
 
+  // ── Gate ⇄ fix loop ──
+  // run_command: shell command of a `type: bash` step.
+  // on_fail:     normalized fix policy JSON, only for steps that declare on_fail.fix_step.
+  // invoked_by:  set on a fix step while it works for the gate that invoked it.
+  // fix_rounds:  fix rounds this gate has sent (per step) / all gates have sent (per run).
+  const gateStepColumns: Array<[string, string]> = [
+    ["run_command", "TEXT"],
+    ["on_fail", "TEXT"],
+    ["invoked_by", "TEXT"],
+    ["fix_rounds", "INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [name, type] of gateStepColumns) {
+    if (!stepColNames.has(name)) db.exec(`ALTER TABLE steps ADD COLUMN ${name} ${type}`);
+  }
+  const gateRunColumns: Array<[string, string]> = [
+    ["fix_rounds", "INTEGER NOT NULL DEFAULT 0"],
+    ["max_fix_rounds", "INTEGER"],
+    ["max_rounds_override", "INTEGER"],
+  ];
+  for (const [name, type] of gateRunColumns) {
+    if (!runColNames.has(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS findings (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      gate TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      round INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_run_fingerprint ON findings(run_id, fingerprint)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_findings_run_gate ON findings(run_id, gate)");
+
   // Indexes for run-scoped scheduling and step claim queries.
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_steps_agent_run_status ON steps(agent_id, run_id, status)",
