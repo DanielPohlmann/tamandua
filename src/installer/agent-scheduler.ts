@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveTamanduaCli, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
+import { BASH_RUNNER_AGENT_ID } from "./types.js";
+import { executeBashRound, schedulableAgents } from "./bash-step.js";
 import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
@@ -1601,6 +1603,18 @@ export async function executePollingRound(
     });
   }
 
+  if (agent.id === BASH_RUNNER_AGENT_ID) {
+    try {
+      const outcome = await executeBashRound(job, timeout);
+      logger.info("Bash round complete", { ...context, outcome });
+    } catch (err) {
+      logger.error("Bash round failed", { ...context, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      inFlightJobs.delete(job.id);
+    }
+    return;
+  }
+
   // ── Stale-claim sweeper (run-scoped) ─────────────────────────────
   try {
     const staleThresholdMs = timeout * 1.5 * 1000;
@@ -1909,8 +1923,9 @@ export async function setupAgentCrons(
 ): Promise<void> {
   const staggerBaseMs = 60_000; // 1 minute per agent
 
-  for (let i = 0; i < workflow.agents.length; i++) {
-    const agent = workflow.agents[i];
+  const agents = schedulableAgents(workflow);
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
     const staggerMs = i * staggerBaseMs;
 
     const jobId = buildJobId(workflow.id, runId, agent.id);
@@ -2150,7 +2165,7 @@ export async function nudgeScheduledRuns(
         ? info.agentId.slice(info.workflowId.length + 1)
         : info.agentId;
 
-      const agent = workflow.agents.find(
+      const agent = schedulableAgents(workflow).find(
         (a) =>
           a.id === shortAgentId ||
           `${info.workflowId}_${a.id}` === info.agentId,
