@@ -67,20 +67,30 @@ function normalizeFinding(raw: unknown): Finding | null {
   return finding;
 }
 
+const KEY_LINE = /^\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?:(?:\*\*)?(.*)$/;
+
+function tryParse(text: string): { ok: boolean; value?: unknown } {
+  try {
+    return { ok: true, value: JSON.parse(text.trim()) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function extractKeyedJson(output: string, key: string): { present: boolean; value?: unknown } {
   const lines = output.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.startsWith(`${key}:`));
+  const start = lines.findIndex((line) => KEY_LINE.exec(line)?.[1] === key);
   if (start === -1) return { present: false };
-  const parts = [lines[start].slice(key.length + 1)];
+  const rest = KEY_LINE.exec(lines[start])![2];
+  const single = tryParse(rest);
+  if (single.ok) return { present: true, value: single.value };
+  const parts = [rest];
   for (let i = start + 1; i < lines.length; i++) {
-    if (/^[A-Z_]+:/.test(lines[i])) break;
+    if (KEY_LINE.test(lines[i]) || lines[i].trimStart().startsWith("```")) break;
     parts.push(lines[i]);
   }
-  try {
-    return { present: true, value: JSON.parse(parts.join("\n").trim()) };
-  } catch {
-    return { present: true };
-  }
+  const multi = tryParse(parts.join("\n"));
+  return multi.ok ? { present: true, value: multi.value } : { present: true };
 }
 
 export function parseFindingsJson(output: string): { present: boolean; malformed: boolean; findings: Finding[] } {
@@ -141,6 +151,24 @@ function getFindingRow(runId: string, fingerprint: string): FindingRow | undefin
     .get(runId, fingerprint) as FindingRow | undefined;
 }
 
+const SEVERITY_RANK: Record<FindingSeverity, number> = { blocking: 2, major: 1, minor: 0 };
+
+function dedupeByFingerprint(gate: string, findings: Finding[]): Finding[] {
+  const byFingerprint = new Map<string, Finding>();
+  for (const finding of findings) {
+    const fingerprint = fingerprintFinding(gate, finding);
+    const kept = byFingerprint.get(fingerprint);
+    if (!kept) {
+      byFingerprint.set(fingerprint, { ...finding });
+      continue;
+    }
+    const winner = SEVERITY_RANK[finding.severity] > SEVERITY_RANK[kept.severity] ? finding : kept;
+    const other = winner === kept ? finding : kept;
+    byFingerprint.set(fingerprint, { ...winner, evidence: `${winner.evidence}\n---\n${other.evidence}` });
+  }
+  return [...byFingerprint.values()];
+}
+
 export function recordGateFindings(params: {
   runId: string;
   gate: string;
@@ -152,7 +180,7 @@ export function recordGateFindings(params: {
   const stored: StoredFinding[] = [];
   const disputedReRaised: StoredFinding[] = [];
 
-  for (const finding of params.findings) {
+  for (const finding of dedupeByFingerprint(params.gate, params.findings)) {
     const fingerprint = fingerprintFinding(params.gate, finding);
     const existing = getFindingRow(params.runId, fingerprint);
     if (!existing) {
@@ -195,7 +223,7 @@ export function applyFixReport(runId: string, report: FixReport): void {
   }
   for (const dispute of report.disputed) {
     const row = getFindingRow(runId, dispute.fingerprint);
-    if (!row) continue;
+    if (!row || (row.status !== "open" && row.status !== "repeated")) continue;
     const payload = { ...(JSON.parse(row.payload) as object), disputeReason: dispute.reason };
     db.prepare("UPDATE findings SET status = 'disputed', payload = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(payload), now, row.id);

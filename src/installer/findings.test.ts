@@ -85,6 +85,29 @@ describe("finding parsing", () => {
   });
 });
 
+describe("finding block tolerance", () => {
+  const json = JSON.stringify([BLOCKING]);
+  const cases: Record<string, string> = {
+    "trailing prose": `FINDINGS_JSON: ${json}
+Done.`,
+    "trailing fence": `FINDINGS_JSON: ${json}
+\`\`\``,
+    "bold key": `**FINDINGS_JSON:** ${json}`,
+    "bold key colon outside": `**FINDINGS_JSON**: ${json}`,
+    "indented key": `  FINDINGS_JSON: ${json}`,
+    "CRLF": `STATUS: retry
+FINDINGS_JSON: ${json}
+SUMMARY: x`,
+  };
+  for (const [name, output] of Object.entries(cases)) {
+    it(`parses with ${name}`, () => {
+      const parsed = parseFindingsJson(output);
+      assert.equal(parsed.malformed, false);
+      assert.equal(parsed.findings.length, 1);
+    });
+  }
+});
+
 describe("finding persistence", () => {
   let home: TempTamanduaHome;
   beforeEach(() => {
@@ -141,5 +164,28 @@ describe("finding persistence", () => {
     assert.equal(listFindings("run-1", { gate: "gate-unit" })[0].status, "resolved");
     deleteRunFindings("run-1");
     assert.equal(listFindings("run-1").length, 0);
+  });
+
+  it("dedupes same-fingerprint findings within one batch", () => {
+    const result = recordGateFindings({
+      runId: "run-1", gate: "gate-review", round: 1,
+      findings: [
+        { ...BLOCKING, symbol: undefined, severity: "major", evidence: "first" } as never,
+        { ...BLOCKING, symbol: undefined, severity: "blocking", evidence: "second" } as never,
+      ],
+    });
+    assert.equal(result.stored.length, 1);
+    assert.equal(result.actionable.length, 1);
+    assert.equal(result.stored[0].status, "open");
+    assert.equal(result.stored[0].severity, "blocking");
+    assert.match(result.stored[0].evidence, /second\n---\nfirst/);
+    assert.equal(listFindings("run-1").length, 1);
+  });
+
+  it("does not dispute a finding that is already resolved", () => {
+    const { stored } = recordGateFindings({ runId: "run-1", gate: "gate-review", round: 1, findings: [BLOCKING as never] });
+    applyFixReport("run-1", { resolved: [stored[0].fingerprint], disputed: [] });
+    applyFixReport("run-1", { resolved: [], disputed: [{ fingerprint: stored[0].fingerprint, reason: "late" }] });
+    assert.equal(listFindings("run-1")[0].status, "resolved");
   });
 });
