@@ -79,6 +79,56 @@ describe("blocked run resume", () => {
     assert.ok(claimStep("wf_reviewer", "run-1").found);
   });
 
+  it("resets fix rounds, clears block markers and keeps findings context", () => {
+    seedRun(getDb(), { id: "run-1", status: "blocked", context: {
+      blocked_step: "gate-review", blocked_reason: "budget", findings_gate_review: "[{\"id\":1}]" } }, [
+      { id: "s-review", stepId: "gate-review", index: 0, status: "waiting", agentId: "wf_reviewer", onFail: POLICY, fixRounds: 3 },
+    ]);
+    prepareBlockedRunResume("run-1");
+    const step = getDb().prepare("SELECT fix_rounds FROM steps WHERE step_id = 'gate-review'").get() as { fix_rounds: number };
+    const ctx = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(step.fix_rounds, 0);
+    assert.equal(ctx.blocked_step, undefined);
+    assert.equal(ctx.blocked_reason, undefined);
+    assert.equal(ctx.findings_gate_review, "[{\"id\":1}]");
+  });
+
+  function seedBlockedGate(): void {
+    seedRun(getDb(), { id: "run-1", status: "blocked", maxFixRounds: 8,
+      context: { blocked_step: "gate-review", blocked_reason: "budget", working_directory_for_harness: home.dir } }, [
+      { id: "s-review", stepId: "gate-review", index: 0, status: "waiting", agentId: "wf_reviewer", onFail: POLICY, fixRounds: 3 },
+    ]);
+  }
+  const okDeps = (status: number) => ({
+    ensureDaemon: async () => {},
+    register: async () => ({ status, body: status >= 300 ? { error: "daemon down" } : {} }),
+  });
+
+  it("resumeBlockedRun resumes the run when registration succeeds", async () => {
+    seedBlockedGate();
+    const result = await resumeBlockedRun("run-1", {}, okDeps(200) as never);
+    assert.deepEqual(result, { status: "resumed", runId: "run-1", workflowId: "wf", stepId: "gate-review" });
+    const run = getDb().prepare("SELECT status, scheduling_status FROM runs WHERE id = 'run-1'").get() as
+      { status: string; scheduling_status: string };
+    assert.deepEqual({ ...run }, { status: "running", scheduling_status: "pending_register" });
+  });
+
+  it("restores the blocked state exactly when registration fails, so a retry succeeds", async () => {
+    seedBlockedGate();
+    await assert.rejects(resumeBlockedRun("run-1", { maxFixRounds: 20 }, okDeps(503) as never), /daemon down/);
+    const run = getDb().prepare("SELECT status, context, max_fix_rounds FROM runs WHERE id = 'run-1'").get() as
+      { status: string; context: string; max_fix_rounds: number };
+    const ctx = JSON.parse(run.context);
+    assert.equal(run.status, "blocked");
+    assert.equal(run.max_fix_rounds, 8);
+    assert.equal(ctx.blocked_step, "gate-review");
+    assert.equal(ctx.blocked_reason, "budget");
+    const step = getDb().prepare("SELECT status, fix_rounds FROM steps WHERE step_id = 'gate-review'").get() as
+      { status: string; fix_rounds: number };
+    assert.deepEqual({ ...step }, { status: "waiting", fix_rounds: 3 });
+    assert.equal((await resumeBlockedRun("run-1", {}, okDeps(200) as never)).status, "resumed");
+  });
+
   it("makes a blocked fix step claimable again", () => {
     seedRun(getDb(), { id: "run-1", status: "blocked", context: { blocked_step: "fix" } }, [
       { id: "s-impl", stepId: "implement", index: 0, status: "done" },

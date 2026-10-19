@@ -142,8 +142,8 @@ export async function runWorkflow(
   // (which always references {{task}}) fails immediately on claim with a missing
   // template key error, aborting the whole run.
   const seededContext: Record<string, string> = {
-    task: taskTitle,
     ...buildEngineContextDefaults(workflow),
+    task: taskTitle,
     ...context,
     workspace_mode: workspaceMode,
     no_hurry_save_tokens_mode: String(noHurrySaveTokensMode ?? false),
@@ -410,21 +410,64 @@ export async function resumeWorkflow(runId: string): Promise<ResumeResult> {
   return { status: "resumed", runId: run.id, workflowId: run.workflow_id, stepId: failedStep?.step_id };
 }
 
-export async function resumeBlockedRun(runId: string, overrides: BudgetOverrides = {}): Promise<ResumeResult> {
+export interface ResumeBlockedRunDeps {
+  ensureDaemon: () => Promise<void>;
+  register: typeof registerRunWithDaemon;
+}
+
+interface BlockedRunSnapshot {
+  run: {
+    status: string; context: string; max_fix_rounds: number | null; max_rounds_override: number | null;
+    scheduling_status: string | null; scheduling_requested_at: string | null; scheduling_error: string | null;
+  };
+  step: { status: string; fix_rounds: number } | undefined;
+  stepName: string;
+}
+
+function snapshotBlockedRun(runId: string, context: string): BlockedRunSnapshot {
+  const db = getDb();
+  const run = db.prepare(
+    `SELECT status, context, max_fix_rounds, max_rounds_override, scheduling_status, scheduling_requested_at,
+            scheduling_error FROM runs WHERE id = ?`,
+  ).get(runId) as BlockedRunSnapshot["run"];
+  const stepName = (JSON.parse(context) as Record<string, string>).blocked_step;
+  const step = db.prepare("SELECT status, fix_rounds FROM steps WHERE run_id = ? AND step_id = ?")
+    .get(runId, stepName) as BlockedRunSnapshot["step"];
+  return { run, step, stepName };
+}
+
+function restoreBlockedRun(runId: string, snapshot: BlockedRunSnapshot, message: string): void {
+  const db = getDb();
+  const { run, step, stepName } = snapshot;
+  db.prepare(
+    `UPDATE runs SET status = ?, context = ?, max_fix_rounds = ?, max_rounds_override = ?, scheduling_status = NULL,
+            scheduling_requested_at = ?, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?`,
+  ).run(run.status, run.context, run.max_fix_rounds, run.max_rounds_override, run.scheduling_requested_at, message, runId);
+  if (step) {
+    db.prepare("UPDATE steps SET status = ?, fix_rounds = ?, updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
+      .run(step.status, step.fix_rounds, runId, stepName);
+  }
+}
+
+export async function resumeBlockedRun(
+  runId: string,
+  overrides: BudgetOverrides = {},
+  deps: ResumeBlockedRunDeps = { ensureDaemon: ensureDaemonControlAvailable, register: registerRunWithDaemon },
+): Promise<ResumeResult> {
   const db = getDb();
   const run = db.prepare("SELECT id, context FROM runs WHERE id = ? AND status = 'blocked'").get(runId) as
     { id: string; context: string } | undefined;
   if (!run) return { status: "not_found" };
 
-  await ensureDaemonControlAvailable();
+  await deps.ensureDaemon();
   validateRunHarnessForScheduling(run.id, run.context);
+  const snapshot = snapshotBlockedRun(run.id, run.context);
   const { stepId, workflowId } = prepareBlockedRunResume(run.id, overrides);
 
-  const registration = await registerRunWithDaemon(run.id, 5000);
+  const registration = await deps.register(run.id, 5000);
   if (!registration || registration.status < 200 || registration.status >= 300) {
     const message = typeof registration?.body.error === "string" ? registration.body.error : "daemon registration failed";
-    db.prepare("UPDATE runs SET status = 'blocked', scheduling_status = NULL, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?")
-      .run(message, run.id);
+    restoreBlockedRun(run.id, snapshot, message);
     throw new Error(`Failed to register resumed run with daemon: ${message}`);
   }
   return { status: "resumed", runId: run.id, workflowId, stepId };
