@@ -16,6 +16,7 @@ import { detectRugpull, relaunchRunAfterRugpull } from "./rugpull.js";
 import {
   EVIDENCE_LINES,
   bashOutputContextKey,
+  blockRunAtStep,
   completeFixStep,
   mergeRunContext,
   parseFixPolicy,
@@ -902,6 +903,10 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
          WHERE prev.run_id = s.run_id
            AND prev.step_index < s.step_index
            AND prev.status NOT IN ('done', 'skipped')
+           AND NOT (prev.invoked_by IS NULL AND prev.step_id IN (
+             SELECT json_extract(g.on_fail, '$.fix_step') FROM steps g
+             WHERE g.run_id = s.run_id AND g.on_fail IS NOT NULL
+           ))
            AND NOT (prev.type = 'loop'
                     AND prev.status = 'running'
                     AND prev.current_story_id IS NULL)
@@ -1287,11 +1292,12 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string };
   const context: Record<string, string> = JSON.parse(run.context);
 
+  const isGate = parseFixPolicy(step.on_fail) !== null && step.type === "single";
   const parsed = parseOutputKeyValues(output);
   for (const [key, value] of Object.entries(parsed)) {
-    if (!RESERVED_CONTEXT_KEYS.has(key)) {
-      context[key] = value;
-    }
+    if (RESERVED_CONTEXT_KEYS.has(key)) continue;
+    if (isGate && key === "findings_json") continue;
+    context[key] = value;
   }
 
   db.prepare(
@@ -1370,6 +1376,18 @@ export function completeStep(stepId: string, output: string): { status: string; 
   }
 
   if (step.invoked_by) {
+    const fixStatus = context["status"]?.toLowerCase();
+    if (fixStatus === "blocked") {
+      const blocked = blockRunAtStep({
+        runId, stepDbId: step.id, stepName: step.step_id,
+        reason: context["reason"] || "Fix step reported STATUS: blocked", output,
+      });
+      finalizeDrainingPause(runId);
+      return blocked;
+    }
+    if (fixStatus === "retry") {
+      return retryWithFeedback(step, context["reason"] || "Fix step reported STATUS: retry");
+    }
     const fixResult = completeFixStep({ ...step, invoked_by: step.invoked_by }, output);
     finalizeDrainingPause(runId);
     return fixResult;
@@ -1674,7 +1692,7 @@ export function advancePipeline(runId: string): { advanced: boolean; runComplete
   // Guard: don't advance or complete a run that's already failed/cancelled
   const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
   if (runStatus?.status === "failed" || runStatus?.status === "canceled"
-    || runStatus?.status === "blocked" || runStatus?.status === "paused") {
+    || runStatus?.status === "blocked") {
     return { advanced: false, runCompleted: false };
   }
 
