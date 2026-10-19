@@ -79,11 +79,16 @@ export async function loadWorkflowSpec(
   }
 
   const steps = spec.steps as Array<Record<string, unknown>>;
+  const seenStepIds = new Set<string>();
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     if (typeof step.id !== "string" || !step.id) {
       throw new Error(`workflow.yml step[${i}] in ${workflowDir} is missing required field: id`);
     }
+    if (seenStepIds.has(step.id)) {
+      throw new Error(`workflow.yml step[${i}] in ${workflowDir} has a duplicate step id "${step.id}"`);
+    }
+    seenStepIds.add(step.id);
     if (step.type === "bash") {
       if (typeof step.run !== "string" || !step.run.trim()) {
         throw new Error(
@@ -127,10 +132,17 @@ function isPositiveInteger(value: unknown): boolean {
 
 function validateFixPolicies(steps: Array<Record<string, unknown>>, workflowDir: string): void {
   const indexById = new Map(steps.map((s, i) => [s.id as string, i]));
+  const fixStepIds = new Set(
+    steps.map((s) => (s.on_fail as Record<string, unknown> | undefined)?.fix_step).filter((id) => id !== undefined),
+  );
   steps.forEach((step, i) => {
     const onFail = step.on_fail as Record<string, unknown> | undefined;
     if (!onFail || onFail.fix_step === undefined) return;
     const where = `workflow.yml step "${String(step.id)}" in ${workflowDir}`;
+    const gateType = step.type ?? "single";
+    if (gateType !== "single" && gateType !== "bash") {
+      throw new Error(`${where}: only single agent steps and bash steps can declare on_fail.fix_step`);
+    }
     const fixStepId = onFail.fix_step;
     if (typeof fixStepId !== "string" || !indexById.has(fixStepId)) {
       throw new Error(`${where}: on_fail.fix_step "${String(fixStepId)}" does not match any step`);
@@ -153,6 +165,9 @@ function validateFixPolicies(steps: Array<Record<string, unknown>>, workflowDir:
       const returnIndex = indexById.get(onFail.return_step as string);
       if (returnIndex === undefined || returnIndex >= i) {
         throw new Error(`${where}: on_fail.return_step "${String(onFail.return_step)}" must name an earlier step`);
+      }
+      if (fixStepIds.has(onFail.return_step)) {
+        throw new Error(`${where}: on_fail.return_step "${String(onFail.return_step)}" names a fix step`);
       }
     }
   });

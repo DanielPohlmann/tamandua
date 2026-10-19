@@ -323,4 +323,66 @@ steps:
       /budgets.max_tokens must be a positive integer/,
     );
   });
+
+  it("rejects duplicate step ids", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: review
+    agent: reviewer
+    input: x
+    expects: y
+  - id: review
+    agent: dev
+    input: x
+    expects: y
+`,
+      /duplicate step id "review"/,
+    );
+  });
+
+  it("rejects on_fail.fix_step on a loop step", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: implement
+    agent: dev
+    type: loop
+    loop: { over: stories }
+    input: x
+    expects: y
+    on_fail: { fix_step: fix }
+  - id: fix
+    agent: dev
+    input: x
+    expects: y
+`,
+      /only single agent steps and bash steps can declare on_fail.fix_step/,
+    );
+  });
+
+  it("rejects a return_step that names a fix step", async () => {
+    await expectRejected(
+      `id: wf
+${AGENTS}
+steps:
+  - id: fix
+    agent: dev
+    input: x
+    expects: y
+  - id: gate-unit
+    type: bash
+    run: node unit.mjs
+    on_fail: { fix_step: fix }
+  - id: gate-review
+    agent: reviewer
+    input: x
+    expects: y
+    on_fail: { fix_step: fix, return_step: fix }
+`,
+      /return_step "fix" names a fix step/,
+    );
+  });
 });
