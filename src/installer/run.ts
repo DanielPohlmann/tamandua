@@ -348,6 +348,14 @@ export async function runWorkflow(
   };
 }
 
+function clearFixInvocationContext(runId: string, rawContext: string): void {
+  const context = JSON.parse(rawContext) as Record<string, string>;
+  if (!("fix_feedback" in context) && !("fix_origin" in context)) return;
+  if ("fix_feedback" in context) context.fix_feedback = "";
+  if ("fix_origin" in context) context.fix_origin = "";
+  getDb().prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), runId);
+}
+
 export interface ResumeResult {
   status: "not_found" | "resumed";
   runId?: string;
@@ -355,7 +363,16 @@ export interface ResumeResult {
   stepId?: string;
 }
 
-export async function resumeWorkflow(runId: string): Promise<ResumeResult> {
+export interface ResumeRunDeps {
+  ensureDaemon: () => Promise<void>;
+  register: typeof registerRunWithDaemon;
+}
+
+export type ResumeBlockedRunDeps = ResumeRunDeps;
+
+const DAEMON_RESUME_DEPS: ResumeRunDeps = { ensureDaemon: ensureDaemonControlAvailable, register: registerRunWithDaemon };
+
+export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON_RESUME_DEPS): Promise<ResumeResult> {
   const db = getDb();
   const run = db.prepare(
     "SELECT id, workflow_id, status, context FROM runs WHERE id = ? AND status = 'failed'",
@@ -363,7 +380,7 @@ export async function resumeWorkflow(runId: string): Promise<ResumeResult> {
 
   if (!run) return { status: "not_found" };
 
-  await ensureDaemonControlAvailable();
+  await deps.ensureDaemon();
   validateRunHarnessForScheduling(run.id, run.context);
 
   // Reset the run to running and request fresh scheduling admission.
@@ -378,16 +395,18 @@ export async function resumeWorkflow(runId: string): Promise<ResumeResult> {
   ).get(run.id) as { id: string; step_id: string; step_index: number } | undefined;
 
   if (failedStep) {
-    // Reset this step and all subsequent steps back to waiting
+    // Reset this step and all subsequent steps back to waiting. A stale fix
+    // invocation would let an idle fix step block every later step's claim.
     db.prepare(
-      "UPDATE steps SET status = 'waiting', retry_count = 0, output = NULL, updated_at = datetime('now') WHERE run_id = ? AND step_index >= ?",
+      "UPDATE steps SET status = 'waiting', retry_count = 0, output = NULL, invoked_by = NULL, updated_at = datetime('now') WHERE run_id = ? AND step_index >= ?",
     ).run(run.id, failedStep.step_index);
+    clearFixInvocationContext(run.id, run.context);
   }
 
   // Promote the next eligible waiting step to 'pending' so polling agents can claim it.
   advancePipeline(run.id);
 
-  const registration = await registerRunWithDaemon(run.id, 5000);
+  const registration = await deps.register(run.id, 5000);
   if (!registration || registration.status < 200 || registration.status >= 300) {
     const message =
       typeof registration?.body.error === "string"
@@ -410,10 +429,6 @@ export async function resumeWorkflow(runId: string): Promise<ResumeResult> {
   return { status: "resumed", runId: run.id, workflowId: run.workflow_id, stepId: failedStep?.step_id };
 }
 
-export interface ResumeBlockedRunDeps {
-  ensureDaemon: () => Promise<void>;
-  register: typeof registerRunWithDaemon;
-}
 
 interface BlockedRunSnapshot {
   run: {
@@ -452,7 +467,7 @@ function restoreBlockedRun(runId: string, snapshot: BlockedRunSnapshot, message:
 export async function resumeBlockedRun(
   runId: string,
   overrides: BudgetOverrides = {},
-  deps: ResumeBlockedRunDeps = { ensureDaemon: ensureDaemonControlAvailable, register: registerRunWithDaemon },
+  deps: ResumeBlockedRunDeps = DAEMON_RESUME_DEPS,
 ): Promise<ResumeResult> {
   const db = getDb();
   const run = db.prepare("SELECT id, context FROM runs WHERE id = ? AND status = 'blocked'").get(runId) as

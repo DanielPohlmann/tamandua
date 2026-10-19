@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { getDb, closeDb } from "../../dist/db.js";
-import { insertRunSteps, buildEngineContextDefaults, resumeBlockedRun } from "../../dist/installer/run.js";
+import { insertRunSteps, buildEngineContextDefaults, resumeBlockedRun, resumeWorkflow } from "../../dist/installer/run.js";
 import { prepareBlockedRunResume } from "../../dist/installer/gate-loop.js";
 import { claimStep } from "../../dist/installer/step-ops.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
@@ -138,6 +138,29 @@ describe("blocked run resume", () => {
     prepareBlockedRunResume("run-1");
     assert.equal(stepStatus("fix"), "pending");
     assert.ok(claimStep("wf_developer", "run-1").found);
+  });
+
+  it("resumeWorkflow clears the fix invocation of a failed fix step so the pipeline cannot deadlock", async () => {
+    seedRun(getDb(), { id: "run-1", status: "failed", context: {
+      fix_feedback: "[{\"rule\":\"x\"}]", fix_origin: "gate-unit", working_directory_for_harness: home.dir } }, [
+      { id: "s-impl", stepId: "implement", index: 0, status: "done" },
+      { id: "s-unit", stepId: "gate-unit", index: 1, status: "waiting", type: "bash", agentId: "wf_bash-runner", onFail: POLICY, fixRounds: 1 },
+      { id: "s-fix", stepId: "fix", index: 2, status: "failed", agentId: "wf_developer", invokedBy: "gate-unit" },
+      { id: "s-review", stepId: "gate-review", index: 3, status: "waiting", agentId: "wf_reviewer" },
+    ]);
+    const result = await resumeWorkflow("run-1", okDeps(200) as never);
+    assert.equal(result.status, "resumed");
+    const fix = getDb().prepare("SELECT status, invoked_by FROM steps WHERE id = 's-fix'").get() as
+      { status: string; invoked_by: string | null };
+    assert.deepEqual({ ...fix }, { status: "waiting", invoked_by: null });
+    const ctx = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(ctx.fix_feedback, "");
+    assert.equal(ctx.fix_origin, "");
+    assert.equal(stepStatus("gate-unit"), "pending");
+
+    getDb().prepare("UPDATE steps SET status = 'done' WHERE id = 's-unit'").run();
+    getDb().prepare("UPDATE steps SET status = 'pending' WHERE id = 's-review'").run();
+    assert.ok(claimStep("wf_reviewer", "run-1").found);
   });
 
   it("surfaces an error when the blocked step no longer exists", () => {
