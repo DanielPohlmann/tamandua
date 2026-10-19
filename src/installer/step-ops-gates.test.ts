@@ -115,6 +115,26 @@ describe("gate loop through step-ops", () => {
     assert.equal(result.status, "retrying");
   });
 
+  it("an engine failure on a gated bash step blocks the run without a fix round", async () => {
+    getDb().prepare("UPDATE steps SET status = 'running' WHERE step_id = 'gate-unit'").run();
+    const result = await completeBashStep("s-unit", 1, "<no output>", "engine error: spawn ENOENT");
+    assert.equal(result.status, "blocked");
+    assert.equal(status("fix"), "waiting");
+    const run = getDb().prepare("SELECT status, context, fix_rounds FROM runs WHERE id = 'run-1'").get() as
+      { status: string; context: string; fix_rounds: number };
+    assert.equal(run.status, "blocked");
+    assert.equal(run.fix_rounds, 0);
+    assert.equal(JSON.parse(run.context).blocked_reason, "engine error: spawn ENOENT");
+  });
+
+  it("an engine failure on an ungated bash step keeps the ordinary failure path", async () => {
+    getDb().prepare("UPDATE steps SET on_fail = NULL, status = 'running' WHERE step_id = 'gate-unit'").run();
+    const result = await completeBashStep("s-unit", 1, "<no output>", "engine error: spawn ENOENT");
+    assert.equal(result.status, "retrying");
+    const step = getDb().prepare("SELECT output FROM steps WHERE id = 's-unit'").get() as { output: string };
+    assert.match(step.output, /engine error: spawn ENOENT/);
+  });
+
   it("an agent cannot rewrite the bash environment allowlist", () => {
     getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ __env_keys: "[\"base_branch\"]" }));
     getDb().prepare("UPDATE steps SET status = 'done' WHERE step_id = 'gate-unit'").run();

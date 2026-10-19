@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { getDb } from "../db.js";
 import { logger } from "../lib/logger.js";
@@ -19,6 +20,8 @@ export interface BashResult {
   exitCode: number;
   output: string;
   timedOut: boolean;
+  /** Set when the shell itself could not be started, as opposed to the command failing. */
+  spawnError?: string;
 }
 
 export interface BashRunOptions {
@@ -124,6 +127,7 @@ export function runBashCommand(command: string, options: BashRunOptions): Promis
 
     let settled = false;
     let timedOut = false;
+    let spawnError: string | undefined;
     let graceTimer: NodeJS.Timeout | undefined;
     const finish = (code: number | null) => {
       if (settled) return;
@@ -133,7 +137,9 @@ export function runBashCommand(command: string, options: BashRunOptions): Promis
       child.stdout?.destroy();
       child.stderr?.destroy();
       const marker = timedOut ? `\nCommand timed out after ${options.timeoutSeconds}s` : "";
-      resolve({ exitCode: timedOut ? 124 : code ?? 1, output: tail + marker, timedOut });
+      const result: BashResult = { exitCode: timedOut ? 124 : code ?? 1, output: tail + marker, timedOut };
+      if (spawnError) result.spawnError = spawnError;
+      resolve(result);
     };
 
     const timer = setTimeout(() => {
@@ -146,6 +152,7 @@ export function runBashCommand(command: string, options: BashRunOptions): Promis
 
     child.on("error", (err) => {
       if (settled) return;
+      spawnError = err.message;
       tail += `\n${err.message}`;
       finish(127);
     });
@@ -176,6 +183,17 @@ export interface BashRoundHooks {
   run?: typeof runBashCommand;
 }
 
+function engineError(detail: string): string {
+  return `engine error: ${detail}`;
+}
+
+/** Why a finished command must block rather than reach the fix agent, if it must. */
+function blockedReasonFor(result: BashResult, timeoutSeconds: number): string | undefined {
+  if (result.spawnError) return engineError(result.spawnError);
+  if (result.timedOut) return `timed out after ${timeoutSeconds}s`;
+  return undefined;
+}
+
 export async function executeBashRound(
   job: { id: string; runId: string; agentId: string; workingDirectoryForHarness?: string },
   timeoutSeconds: number,
@@ -192,18 +210,28 @@ export async function executeBashRound(
     const cwd = job.workingDirectoryForHarness ?? context["repo"] ?? process.cwd();
     const run = hooks.run ?? runBashCommand;
 
+    if (!step.run_command) {
+      const reason = engineError(`bash step ${step.step_id} has no run command`);
+      await completeBashStep(stepId, 1, reason, reason);
+      return "completed";
+    }
+    if (!fs.existsSync(cwd)) {
+      const reason = engineError(`working directory does not exist: ${cwd}`);
+      await completeBashStep(stepId, 1, reason, reason);
+      return "completed";
+    }
+
     logger.info("bash step launched", { runId: job.runId, stepId: step.step_id, cwd });
-    const result = step.run_command
-      ? await run(step.run_command, { cwd, env: buildBashEnv(context), timeoutSeconds, onSpawn: hooks.onSpawn })
-      : { exitCode: 1, output: `Bash step ${step.step_id} has no run command`, timedOut: false };
+    const result = await run(step.run_command, { cwd, env: buildBashEnv(context), timeoutSeconds, onSpawn: hooks.onSpawn });
     logger.info("bash step finished", { runId: job.runId, stepId: step.step_id, exitCode: result.exitCode, timedOut: result.timedOut });
 
-    await completeBashStep(stepId, result.exitCode, result.output);
+    await completeBashStep(stepId, result.exitCode, result.output, blockedReasonFor(result, timeoutSeconds));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error("bash step engine error", { runId: job.runId, stepId, error: message });
     try {
-      await completeBashStep(stepId, 1, `<engine error: ${message}>`);
+      const reason = engineError(message);
+      await completeBashStep(stepId, 1, `<${reason}>`, reason);
     } catch (completeErr) {
       logger.error("bash step could not be failed after engine error", {
         runId: job.runId,

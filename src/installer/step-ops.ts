@@ -1641,11 +1641,16 @@ function retryWithFeedback(
 /**
  * Complete a `type: bash` step from its exit code and combined output.
  * Bash output is never merged as KEY: value lines; agents read it from `<step>_output`.
+ *
+ * `blockedReason` marks a failure the fix agent cannot act on (engine error,
+ * timeout): a gated step blocks the run instead of starting a fix round, and an
+ * ungated step fails through the ordinary retry path with that reason.
  */
 export async function completeBashStep(
   stepId: string,
   exitCode: number,
   output: string,
+  blockedReason?: string,
 ): Promise<{ status: string; detail?: string }> {
   const db = getDb();
   const step = db.prepare("SELECT id, run_id, step_id, on_fail, fix_rounds FROM steps WHERE id = ?").get(stepId) as
@@ -1658,6 +1663,12 @@ export async function completeBashStep(
   mergeRunContext(step.run_id, { [bashOutputContextKey(step.step_id)]: evidence });
 
   const policy = parseFixPolicy(step.on_fail);
+  if (blockedReason) {
+    if (!policy) return failStep(stepId, `${blockedReason}\n${evidence}`);
+    const blocked = blockRunAtStep({ runId: step.run_id, stepDbId: step.id, stepName: step.step_id, reason: blockedReason, output: evidence });
+    finalizeDrainingPause(step.run_id);
+    return blocked;
+  }
   if (policy) {
     const settlement = settleGate(step, policy, {
       failed: exitCode !== 0,

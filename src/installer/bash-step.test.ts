@@ -214,3 +214,79 @@ describe("executeBashRound", () => {
     assert.equal(outcome, "no_work");
   });
 });
+
+describe("executeBashRound on a gated step", () => {
+  let home: TempTamanduaHome;
+  const JOB = () => ({ id: "job-1", runId: "run-1", agentId: "wf_bash-runner", workingDirectoryForHarness: home.dir });
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-bash-gated-");
+    seedRun(getDb(), { id: "run-1", maxFixRounds: 8, context: { fix_feedback: "", fix_origin: "" } }, [
+      { id: "s-unit", stepId: "gate-unit", index: 0, status: "pending", type: "bash", agentId: "wf_bash-runner",
+        runCommand: "node gate.mjs", onFail: { fix_step: "fix", max_rounds: 3 } },
+      { id: "s-fix", stepId: "fix", index: 1, status: "waiting", agentId: "wf_developer" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  function blockedState() {
+    const run = getDb().prepare("SELECT status, context, fix_rounds FROM runs WHERE id = 'run-1'").get() as
+      { status: string; context: string; fix_rounds: number };
+    const fix = getDb().prepare("SELECT status FROM steps WHERE id = 's-fix'").get() as { status: string };
+    return { run: run.status, reason: JSON.parse(run.context).blocked_reason as string | undefined, fixRounds: run.fix_rounds, fix: fix.status };
+  }
+
+  it("blocks the run instead of starting a fix round when the engine throws", async () => {
+    await executeBashRound(JOB(), 30, { run: async () => { throw new Error("boom"); } });
+    const state = blockedState();
+    assert.equal(state.run, "blocked");
+    assert.match(state.reason ?? "", /^engine error: boom/);
+    assert.equal(state.fix, "waiting");
+    assert.equal(state.fixRounds, 0);
+  });
+
+  it("blocks the run when the command cannot be spawned", async () => {
+    await executeBashRound(JOB(), 30, {
+      run: async () => ({ exitCode: 127, output: "spawn failed", timedOut: false, spawnError: "spawn ENOENT" }),
+    });
+    const state = blockedState();
+    assert.equal(state.run, "blocked");
+    assert.match(state.reason ?? "", /^engine error: spawn ENOENT/);
+    assert.equal(state.fix, "waiting");
+  });
+
+  it("blocks the run when the working directory does not exist", async () => {
+    await executeBashRound({ ...JOB(), workingDirectoryForHarness: path.join(home.dir, "missing") }, 30);
+    const state = blockedState();
+    assert.equal(state.run, "blocked");
+    assert.match(state.reason ?? "", /^engine error: .*missing/);
+    assert.equal(state.fix, "waiting");
+  });
+
+  it("blocks the run when the step has no run command", async () => {
+    getDb().prepare("UPDATE steps SET run_command = NULL WHERE id = 's-unit'").run();
+    await executeBashRound(JOB(), 30);
+    const state = blockedState();
+    assert.equal(state.run, "blocked");
+    assert.match(state.reason ?? "", /^engine error: .*no run command/);
+  });
+
+  it("blocks the run when the command times out", async () => {
+    await executeBashRound(JOB(), 30, {
+      run: async () => ({ exitCode: 124, output: "slow\nCommand timed out after 30s", timedOut: true }),
+    });
+    const state = blockedState();
+    assert.equal(state.run, "blocked");
+    assert.equal(state.reason, "timed out after 30s");
+    assert.equal(state.fix, "waiting");
+  });
+
+  it("still starts a fix round for an ordinary non-zero exit", async () => {
+    await executeBashRound(JOB(), 30, {
+      run: async () => ({ exitCode: 1, output: "error CS1002: ; expected", timedOut: false }),
+    });
+    const state = blockedState();
+    assert.equal(state.run, "running");
+    assert.equal(state.fix, "pending");
+    assert.equal(state.fixRounds, 1);
+  });
+});
