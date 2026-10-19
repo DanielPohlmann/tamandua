@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { getDb, closeDb } from "../../dist/db.js";
 import {
@@ -18,7 +19,35 @@ describe("buildBashEnv", () => {
   });
 });
 
+describe("buildBashEnv exclusions", () => {
+  it("drops output, findings and feedback keys and oversized values", () => {
+    const env = buildBashEnv({
+      gate_unit_output: "x",
+      findings_open: "y",
+      fix_feedback: "z",
+      fix_feedback_extra: "z",
+      minor_findings: "m",
+      big: "a".repeat(4097),
+      ok: "a".repeat(4096),
+    });
+    assert.deepEqual(env, { OK: "a".repeat(4096) });
+  });
+
+  it("never overrides protected names, case-insensitively", () => {
+    const env = buildBashEnv({ path: "x", Path: "x", comspec: "x", home: "x", Temp: "x", shell: "x", repo: "r" });
+    assert.deepEqual(env, { REPO: "r" });
+  });
+});
+
+function isAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 describe("runBashCommand", () => {
+  let fixtures: string;
+  beforeEach(() => { fixtures = fs.mkdtempSync(path.join(os.tmpdir(), "tamandua-bash-fx-")); });
+  afterEach(() => { fs.rmSync(fixtures, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); });
+
   it("captures combined output and the exit code", async () => {
     const result = await runBashCommand(
       `node -e "console.log('out:' + process.env.BASE_BRANCH); console.error('err'); process.exit(3)"`,
@@ -30,9 +59,53 @@ describe("runBashCommand", () => {
     assert.equal(result.timedOut, false);
   });
 
-  it("kills a command that exceeds its timeout", async () => {
-    const result = await runBashCommand(`node -e "setTimeout(() => {}, 60000)"`, { cwd: process.cwd(), env: {}, timeoutSeconds: 1 });
+  it("kills the whole process tree on timeout so a grandchild cannot hold the step", async () => {
+    const grandchild = path.join(fixtures, "grandchild.cjs");
+    const parent = path.join(fixtures, "parent.mjs");
+    const pidFile = path.join(fixtures, "grandchild.pid");
+    fs.writeFileSync(grandchild, "require('node:fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(() => {}, 60000);");
+    fs.writeFileSync(
+      parent,
+      `import { spawn } from "node:child_process";
+spawn(process.execPath, [${JSON.stringify(grandchild)}, ${JSON.stringify(pidFile)}], { stdio: "inherit" });
+setTimeout(() => {}, 60000);
+`,
+    );
+    const started = Date.now();
+    const result = await runBashCommand(`node "${parent}"`, { cwd: process.cwd(), env: {}, timeoutSeconds: 2 });
+    const elapsedMs = Date.now() - started;
     assert.equal(result.timedOut, true);
+    assert.equal(result.exitCode, 124);
+    assert.match(result.output, /timed out/);
+    assert.ok(elapsedMs < 12_000, `took ${elapsedMs}ms`);
+    const grandchildPid = Number(fs.readFileSync(pidFile, "utf8"));
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && isAlive(grandchildPid)) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(isAlive(grandchildPid), false);
+  });
+
+  it("keeps the tail of the output when it exceeds the cap", async () => {
+    const script = path.join(fixtures, "lines.mjs");
+    fs.writeFileSync(script, "for (let i = 1; i <= 2000; i++) console.log('line-' + i);\n");
+    const result = await runBashCommand(`node "${script}"`, { cwd: fixtures, env: {}, timeoutSeconds: 30, maxOutputChars: 200 });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.output.length, 200);
+    assert.match(result.output, /line-2000/);
+    assert.doesNotMatch(result.output, /line-1(?![0-9])/);
+  });
+
+  it("preserves multibyte characters split across chunks", async () => {
+    const script = path.join(fixtures, "utf8.mjs");
+    fs.writeFileSync(
+      script,
+      "const b = Buffer.from('ééé'); process.stdout.write(b.subarray(0, 1)); setTimeout(() => process.stdout.write(b.subarray(1)), 50);\n",
+    );
+    const result = await runBashCommand(`node "${script}"`, { cwd: fixtures, env: {}, timeoutSeconds: 30 });
+    assert.equal(result.output, "ééé");
+  });
+
+  it("reports a failure when the working directory does not exist", async () => {
+    const result = await runBashCommand("node -e 0", { cwd: path.join(fixtures, "missing"), env: {}, timeoutSeconds: 10 });
     assert.notEqual(result.exitCode, 0);
   });
 });
@@ -68,6 +141,37 @@ describe("executeBashRound", () => {
     assert.equal(row.status, "done");
     assert.match(row.output, /branch=develop/);
     assert.equal((getDb().prepare("SELECT status FROM steps WHERE id = 's-next'").get() as { status: string }).status, "pending");
+  });
+
+  it("fails the step when the engine throws after the claim", async () => {
+    const outcome = await executeBashRound(
+      { id: "job-1", runId: "run-1", agentId: "wf_bash-runner", workingDirectoryForHarness: home.dir },
+      30,
+      { run: async () => { throw new Error("boom"); } },
+    );
+    assert.equal(outcome, "completed");
+    const row = getDb().prepare("SELECT status, output FROM steps WHERE id = 's-unit'").get() as { status: string; output: string };
+    assert.notEqual(row.status, "running");
+    assert.notEqual(row.status, "done");
+    assert.match(row.output, /engine error: boom/);
+  });
+
+  it("fails the step when it has no run command", async () => {
+    getDb().prepare("UPDATE steps SET run_command = NULL WHERE id = 's-unit'").run();
+    await executeBashRound({ id: "job-1", runId: "run-1", agentId: "wf_bash-runner", workingDirectoryForHarness: home.dir }, 30);
+    const row = getDb().prepare("SELECT status, output FROM steps WHERE id = 's-unit'").get() as { status: string; output: string };
+    assert.notEqual(row.status, "done");
+    assert.match(row.output, /no run command/);
+  });
+
+  it("fails the step when the command cannot start in the given directory", async () => {
+    await executeBashRound(
+      { id: "job-1", runId: "run-1", agentId: "wf_bash-runner", workingDirectoryForHarness: path.join(home.dir, "missing") },
+      30,
+    );
+    const row = getDb().prepare("SELECT status FROM steps WHERE id = 's-unit'").get() as { status: string };
+    assert.notEqual(row.status, "done");
+    assert.notEqual(row.status, "running");
   });
 
   it("reports no_work when nothing is pending", async () => {

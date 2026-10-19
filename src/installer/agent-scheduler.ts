@@ -5,7 +5,7 @@ import path from "node:path";
 import { resolveTamanduaCli, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
 import { BASH_RUNNER_AGENT_ID } from "./types.js";
-import { executeBashRound, schedulableAgents } from "./bash-step.js";
+import { executeBashRound, killProcessTree, schedulableAgents } from "./bash-step.js";
 import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
@@ -252,6 +252,10 @@ function buildStreamLogMetadata(stream: string): StreamLogMetadata {
 }
 
 function safeKillPgid(pgid: number, signal: NodeJS.Signals): void {
+  if (process.platform === "win32") {
+    killProcessTree(pgid, signal);
+    return;
+  }
   try {
     // Negative PID => kill the entire process group.
     process.kill(-pgid, signal);
@@ -1605,12 +1609,15 @@ export async function executePollingRound(
 
   if (agent.id === BASH_RUNNER_AGENT_ID) {
     try {
-      const outcome = await executeBashRound(job, timeout);
+      const outcome = await executeBashRound(job, timeout, {
+        onSpawn: ({ pid, pgid }) => inFlightChildren.set(job.id, { pid, pgid, killed: false }),
+      });
       logger.info("Bash round complete", { ...context, outcome });
     } catch (err) {
       logger.error("Bash round failed", { ...context, error: err instanceof Error ? err.message : String(err) });
     } finally {
       inFlightJobs.delete(job.id);
+      inFlightChildren.delete(job.id);
     }
     return;
   }
