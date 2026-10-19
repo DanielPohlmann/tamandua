@@ -10,6 +10,7 @@ import {
   registerRunWithDaemon,
 } from "../server/control-client.js";
 import { emitEvent } from "./events.js";
+import { inferRole } from "./install.js";
 import { advancePipeline, scheduleRunCronTeardown } from "./step-ops.js";
 import {
   RUN_CONTEXT_WORKING_DIRECTORY_FOR_HARNESS_KEY,
@@ -79,9 +80,13 @@ export function buildEngineContextDefaults(workflow: WorkflowSpec): Record<strin
 export function insertRunSteps(workflow: WorkflowSpec, runId: string, now: string): void {
   const insertStep = getDb().prepare(
     `INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, retry_count,
-                        max_retries, type, loop_config, run_command, on_fail, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?, ?, ?)`,
+                        max_retries, type, loop_config, run_command, on_fail, agent_role, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  const roleOf = (agentId: string) => {
+    const agent = workflow.agents.find((a) => a.id === agentId);
+    return agent?.role ?? inferRole(agentId);
+  };
   workflow.steps.forEach((step, i) => {
     const scopedAgentId = step.agent.startsWith(`${workflow.id}_`) ? step.agent : `${workflow.id}_${step.agent}`;
     insertStep.run(
@@ -97,6 +102,7 @@ export function insertRunSteps(workflow: WorkflowSpec, runId: string, now: strin
       step.loop ? JSON.stringify(step.loop) : null,
       step.type === "bash" ? step.run ?? null : null,
       serializeFixPolicy(step.on_fail),
+      roleOf(step.agent),
       now,
       now,
     );

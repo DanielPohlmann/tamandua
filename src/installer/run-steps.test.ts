@@ -40,6 +40,13 @@ describe("insertRunSteps", () => {
     assert.equal(rows[2].on_fail, null);
   });
 
+  it("persists the agent role used for read-only enforcement", () => {
+    const workflow = { ...WORKFLOW, agents: [{ id: "reviewer", role: "verification", workspace: { baseDir: "x" } }] };
+    insertRunSteps(workflow as never, "run-1", new Date().toISOString());
+    const roles = getDb().prepare("SELECT step_id, agent_role FROM steps WHERE run_id = 'run-1' ORDER BY step_index").all() as Array<{ step_id: string; agent_role: string }>;
+    assert.deepEqual(roles.map((r) => r.agent_role), ["coding", "verification", "coding"]);
+  });
+
   it("seeds engine and workflow context defaults", () => {
     const defaults = buildEngineContextDefaults(WORKFLOW as never);
     assert.equal(defaults.base_branch, "develop");

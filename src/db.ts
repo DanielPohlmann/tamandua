@@ -155,6 +155,8 @@ function migrate(db: DatabaseSync): void {
     ["on_fail", "TEXT"],
     ["invoked_by", "TEXT"],
     ["fix_rounds", "INTEGER NOT NULL DEFAULT 0"],
+    ["agent_role", "TEXT"],
+    ["worktree_baseline", "TEXT"],
   ];
   for (const [name, type] of gateStepColumns) {
     if (!stepColNames.has(name)) db.exec(`ALTER TABLE steps ADD COLUMN ${name} ${type}`);
@@ -163,6 +165,8 @@ function migrate(db: DatabaseSync): void {
     ["fix_rounds", "INTEGER NOT NULL DEFAULT 0"],
     ["max_fix_rounds", "INTEGER"],
     ["max_rounds_override", "INTEGER"],
+    ["max_tokens", "INTEGER"],
+    ["notify_format", "TEXT"],
   ];
   for (const [name, type] of gateRunColumns) {
     if (!runColNames.has(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);

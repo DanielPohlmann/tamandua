@@ -50,6 +50,8 @@ export interface SeedStep {
   runCommand?: string | null;
   invokedBy?: string | null;
   fixRounds?: number;
+  agentRole?: string | null;
+  worktreeBaseline?: string | null;
 }
 
 export function seedRun(db: Db, run: SeedRun, steps: SeedStep[]): void {
@@ -60,8 +62,8 @@ export function seedRun(db: Db, run: SeedRun, steps: SeedStep[]): void {
   for (const step of steps) {
     db.prepare(
       `INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, type,
-                          on_fail, run_command, invoked_by, fix_rounds, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+                          on_fail, run_command, invoked_by, fix_rounds, agent_role, worktree_baseline, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
     ).run(
       step.id,
       run.id,
@@ -75,6 +77,8 @@ export function seedRun(db: Db, run: SeedRun, steps: SeedStep[]): void {
       step.runCommand ?? null,
       step.invokedBy ?? null,
       step.fixRounds ?? 0,
+      step.agentRole ?? null,
+      step.worktreeBaseline ?? null,
     );
   }
 }
