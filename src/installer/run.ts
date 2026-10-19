@@ -16,7 +16,15 @@ import {
   validateRunHarnessForScheduling,
 } from "./run-harness.js";
 import { createRunWorktree, type ManagedRunWorktree } from "./worktree-manager.js";
-import type { HarnessType } from "./types.js";
+import {
+  DEFAULT_MAX_FIX_ROUNDS,
+  bashOutputContextKey,
+  contextKeyFor,
+  prepareBlockedRunResume,
+  serializeFixPolicy,
+  type BudgetOverrides,
+} from "./gate-loop.js";
+import type { HarnessType, WorkflowSpec } from "./types.js";
 
 export interface RunWorkflowParams {
   workflowId: string;
@@ -46,6 +54,49 @@ export interface RunWorkflowResult {
   status: string;
   stepCount: number;
   workingDirectoryForHarness: string;
+}
+
+export function buildEngineContextDefaults(workflow: WorkflowSpec): Record<string, string> {
+  const defaults: Record<string, string> = {};
+  for (const [key, value] of Object.entries(workflow.context ?? {})) defaults[key] = String(value);
+  const gated = workflow.steps.filter((s) => s.on_fail?.fix_step);
+  if (gated.length > 0) {
+    defaults.fix_feedback = "";
+    defaults.fix_origin = "";
+    defaults.minor_findings = "(none)";
+    for (const step of gated) defaults[contextKeyFor("findings", step.id)] = "[]";
+  }
+  for (const step of workflow.steps.filter((s) => s.type === "bash")) {
+    defaults[bashOutputContextKey(step.id)] = "";
+  }
+  return defaults;
+}
+
+export function insertRunSteps(workflow: WorkflowSpec, runId: string, now: string): void {
+  const insertStep = getDb().prepare(
+    `INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, retry_count,
+                        max_retries, type, loop_config, run_command, on_fail, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  workflow.steps.forEach((step, i) => {
+    const scopedAgentId = step.agent.startsWith(`${workflow.id}_`) ? step.agent : `${workflow.id}_${step.agent}`;
+    insertStep.run(
+      crypto.randomUUID(),
+      runId,
+      step.id,
+      scopedAgentId,
+      i,
+      step.input,
+      step.expects,
+      step.max_retries ?? 4,
+      step.type ?? "single",
+      step.loop ? JSON.stringify(step.loop) : null,
+      step.type === "bash" ? step.run ?? null : null,
+      serializeFixPolicy(step.on_fail),
+      now,
+      now,
+    );
+  });
 }
 
 /**
@@ -92,6 +143,7 @@ export async function runWorkflow(
   // template key error, aborting the whole run.
   const seededContext: Record<string, string> = {
     task: taskTitle,
+    ...buildEngineContextDefaults(workflow),
     ...context,
     workspace_mode: workspaceMode,
     no_hurry_save_tokens_mode: String(noHurrySaveTokensMode ?? false),
@@ -241,42 +293,13 @@ export async function runWorkflow(
   // (and/or reconciler) can admit them.
   db.prepare(
     `INSERT INTO runs (id, run_number, workflow_id, task, status, context, tokens_spent,
-                       scheduling_status, scheduling_requested_at, notify_url,
+                       scheduling_status, scheduling_requested_at, notify_url, max_fix_rounds,
                        created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?)`,
-  ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyUrl ?? null, now, now);
+     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?)`,
+  ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyUrl ?? null,
+    workflow.budgets?.max_fix_rounds ?? DEFAULT_MAX_FIX_ROUNDS, now, now);
 
-  // Insert step records for each workflow step
-  const insertStep = db.prepare(
-    `INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, retry_count, max_retries, type, loop_config, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?)`,
-  );
-
-  for (let i = 0; i < workflow.steps.length; i++) {
-    const step = workflow.steps[i];
-    const stepDbId = crypto.randomUUID();
-    const maxRetries = step.max_retries ?? 4;
-    const stepType = step.type ?? "single";
-    const loopConfig = step.loop ? JSON.stringify(step.loop) : null;
-    const scopedAgentId = step.agent.startsWith(`${workflow.id}_`)
-      ? step.agent
-      : `${workflow.id}_${step.agent}`;
-
-    insertStep.run(
-      stepDbId,
-      runId,
-      step.id,
-      scopedAgentId,
-      i,
-      step.input,
-      step.expects,
-      maxRetries,
-      stepType,
-      loopConfig,
-      now,
-      now,
-    );
-  }
+  insertRunSteps(workflow, runId, now);
 
   // Emit run.started event
   emitEvent({
@@ -385,4 +408,24 @@ export async function resumeWorkflow(runId: string): Promise<ResumeResult> {
   }
 
   return { status: "resumed", runId: run.id, workflowId: run.workflow_id, stepId: failedStep?.step_id };
+}
+
+export async function resumeBlockedRun(runId: string, overrides: BudgetOverrides = {}): Promise<ResumeResult> {
+  const db = getDb();
+  const run = db.prepare("SELECT id, context FROM runs WHERE id = ? AND status = 'blocked'").get(runId) as
+    { id: string; context: string } | undefined;
+  if (!run) return { status: "not_found" };
+
+  await ensureDaemonControlAvailable();
+  validateRunHarnessForScheduling(run.id, run.context);
+  const { stepId, workflowId } = prepareBlockedRunResume(run.id, overrides);
+
+  const registration = await registerRunWithDaemon(run.id, 5000);
+  if (!registration || registration.status < 200 || registration.status >= 300) {
+    const message = typeof registration?.body.error === "string" ? registration.body.error : "daemon registration failed";
+    db.prepare("UPDATE runs SET status = 'blocked', scheduling_status = NULL, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(message, run.id);
+    throw new Error(`Failed to register resumed run with daemon: ${message}`);
+  }
+  return { status: "resumed", runId: run.id, workflowId, stepId };
 }
