@@ -264,6 +264,31 @@ function safeKillPgid(pgid: number, signal: NodeJS.Signals): void {
   }
 }
 
+const SIGKILL_FOLLOW_UP_MS = 5000;
+
+export interface ProcessGroupTerminationDeps {
+  platform: NodeJS.Platform;
+  kill: (pgid: number, signal: NodeJS.Signals) => void;
+  schedule: (fn: () => void, delayMs: number) => void;
+}
+
+const defaultTerminationDeps: ProcessGroupTerminationDeps = {
+  platform: process.platform,
+  kill: safeKillPgid,
+  schedule: (fn, delayMs) => { setTimeout(fn, delayMs).unref(); },
+};
+
+/**
+ * SIGTERM the group, then SIGKILL it after a grace period. On Windows the
+ * first call is already `taskkill /T /F`, and repeating it later could hit a
+ * reused PID, so there is no follow-up.
+ */
+export function terminateProcessGroup(pgid: number, deps: ProcessGroupTerminationDeps = defaultTerminationDeps): void {
+  deps.kill(pgid, "SIGTERM");
+  if (deps.platform === "win32") return;
+  deps.schedule(() => deps.kill(pgid, "SIGKILL"), SIGKILL_FOLLOW_UP_MS);
+}
+
 export async function runPi(
   args: string[],
   options: RunPiOptions = {},
@@ -344,10 +369,8 @@ export async function runPi(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      // Terminate the whole process group: SIGTERM, then SIGKILL after 5s.
       if (pgid) {
-        safeKillPgid(pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(pgid);
       } else {
         try { child.kill("SIGKILL"); } catch { /* best effort */ }
       }
@@ -531,8 +554,7 @@ export async function runHermes(
       if (settled) return;
       settled = true;
       if (pgid) {
-        safeKillPgid(pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(pgid);
       } else {
         try { child.kill("SIGKILL"); } catch { /* best effort */ }
       }
@@ -712,8 +734,7 @@ export async function runClaude(
       if (settled) return;
       settled = true;
       if (pgid) {
-        safeKillPgid(pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(pgid);
       } else {
         try { child.kill("SIGKILL"); } catch { /* best effort */ }
       }
@@ -2002,10 +2023,8 @@ export async function removeRunCrons(runId: string): Promise<void> {
     const child = inFlightChildren.get(id);
     if (child && !child.killed) {
       child.killed = true;
-      // Terminate the entire process group: SIGTERM, then SIGKILL after 5s.
       if (child.pgid) {
-        safeKillPgid(child.pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(child.pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(child.pgid);
       }
     }
     inFlightChildren.delete(id);
@@ -2096,8 +2115,7 @@ export function shutdownAllCrons(): void {
   for (const [id, child] of inFlightChildren) {
     if (!child.killed && child.pgid) {
       child.killed = true;
-      safeKillPgid(child.pgid, "SIGTERM");
-      setTimeout(() => safeKillPgid(child.pgid, "SIGKILL"), 5000).unref();
+      terminateProcessGroup(child.pgid);
     }
   }
   inFlightChildren.clear();
