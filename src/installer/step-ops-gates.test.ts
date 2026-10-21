@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { getDb, closeDb } from "../../dist/db.js";
 import { claimStep, completeStep, completeBashStep, advancePipeline } from "../../dist/installer/step-ops.js";
 import { getRunEvents } from "../../dist/installer/events.js";
+import { resumeBlockedRun } from "../../dist/installer/run.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
 const GATE_EXPECTS = "regex:^STATUS: (done|retry|blocked)$";
@@ -277,5 +278,30 @@ describe("pr opened event", () => {
     completeStep("s-pr", "STATUS: done\nPR: https://github.com/o/r/pull/12");
     completeStep("s-pr2", "STATUS: done\nPR: https://github.com/o/r/pull/12");
     assert.equal(getRunEvents("run-1").filter((e) => e.event === "run.pr_opened").length, 1);
+  });
+});
+
+describe("blocking while a drain-pause is in progress", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-step-ops-drain-block-");
+    seedRun(getDb(), { id: "run-1", context: { working_directory_for_harness: home.dir } }, [
+      { id: "s-review", stepId: "gate-review", index: 0, status: "running", agentId: "wf_reviewer", expects: GATE_EXPECTS, onFail: POLICY },
+      { id: "s-fix", stepId: "fix", index: 1, status: "waiting", agentId: "wf_developer" },
+    ]);
+    getDb().prepare("UPDATE runs SET scheduling_status = 'draining_pause' WHERE id = 'run-1'").run();
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("keeps the run blocked instead of finalizing the pause, and it stays resumable", async () => {
+    assert.equal(completeStep("s-review", "STATUS: blocked\nREASON: needs a human").status, "blocked");
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "blocked");
+    assert.equal(getRunEvents("run-1").some((e) => e.event === "run.paused"), false);
+
+    const deps = { ensureDaemon: async () => {}, register: async () => ({ status: 200, body: {} }) };
+    const resumed = await resumeBlockedRun("run-1", {}, deps as never);
+    assert.equal(resumed.status, "resumed");
+    assert.equal(status("gate-review"), "pending");
   });
 });

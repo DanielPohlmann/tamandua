@@ -1238,16 +1238,17 @@ export function finalizeDrainingPause(runId: string): void {
   });
   if (hasInFlightStep) return;
 
-  // Finalize the pause: clear timers and set status to paused.
+  // Finalize the pause only for a run still running: a run blocked meanwhile stays blocked.
+  const paused = db.prepare(
+    "UPDATE runs SET status = 'paused', scheduling_status = 'paused', updated_at = datetime('now') WHERE id = ? AND status = 'running'",
+  ).run(runId);
+  if (Number(paused.changes) !== 1) return;
+
   import("./agent-scheduler.js")
     .then((m) => m.removeRunCrons(runId))
     .catch((err) => {
       logger.warn("finalizeDrainingPause: removeRunCrons failed", { runId, error: String(err) });
     });
-
-  db.prepare(
-    "UPDATE runs SET status = 'paused', scheduling_status = 'paused', updated_at = datetime('now') WHERE id = ?",
-  ).run(runId);
 
   emitEvent({
     ts: new Date().toISOString(),
