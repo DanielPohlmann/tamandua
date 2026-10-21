@@ -305,3 +305,31 @@ describe("blocking while a drain-pause is in progress", () => {
     assert.equal(status("gate-review"), "pending");
   });
 });
+
+describe("engine-owned context keys", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-step-ops-reserved-");
+    seedRun(getDb(), { id: "run-1", context: { blocked_reason: "engine" } }, [
+      { id: "s-plan", stepId: "plan", index: 0, status: "running", agentId: "wf_planner" },
+      { id: "s-next", stepId: "next", index: 1, status: "waiting", agentId: "wf_developer" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("ignores agent output lines that would overwrite them", () => {
+    completeStep("s-plan", [
+      "STATUS: done",
+      "RATE_LIMIT_RESUME_AT: 2099-01-01T00:00:00.000Z",
+      "RATE_LIMIT_PAUSES: {\"plan\":0}",
+      "BLOCKED_STEP: next",
+      "BLOCKED_REASON: forged",
+    ].join("\n"));
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(context.rate_limit_resume_at, undefined);
+    assert.equal(context.rate_limit_pauses, undefined);
+    assert.equal(context.blocked_step, undefined);
+    assert.equal(context.blocked_reason, "engine");
+    assert.equal(context.status, "done");
+  });
+});

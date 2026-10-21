@@ -26,7 +26,7 @@ import {
 import { parseFindingsJson } from "./findings.js";
 import { detectOpenedPr } from "./notifications.js";
 import { enforceReadOnly, recordReadOnlyBaseline } from "./read-only.js";
-import { resetRateLimitPauses } from "./rate-limit.js";
+import { RATE_LIMIT_PAUSES_KEY, RATE_LIMIT_RESUME_KEY, resetRateLimitPauses } from "./rate-limit.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Key-Value Parsing
@@ -69,8 +69,9 @@ export function parseOutputKeyValues(output: string): Record<string, string> {
 
 /**
  * Reserved context keys that must not be overwritten by step output parsing.
- * These are structural keys that define the harness/repo/environment and should
- * only be set during run creation, not by agent-generated KEY:value output.
+ * These are structural keys that define the harness/repo/environment, set only
+ * during run creation, or engine-owned state (rate-limit pauses, block records)
+ * that agent-generated KEY:value output must never forge.
  */
 const RESERVED_CONTEXT_KEYS = new Set([
   "repo",
@@ -84,6 +85,10 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "worktree_origin_sha",
   "original_branch",
   BASH_ENV_KEYS_CONTEXT_KEY,
+  RATE_LIMIT_RESUME_KEY,
+  RATE_LIMIT_PAUSES_KEY,
+  "blocked_step",
+  "blocked_reason",
 ]);
 
 // ══════════════════════════════════════════════════════════════════════
