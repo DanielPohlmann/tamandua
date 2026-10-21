@@ -85,12 +85,14 @@ export function insertRunSteps(workflow: WorkflowSpec, runId: string, now: strin
                         max_retries, type, loop_config, run_command, on_fail, agent_role, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  const roleOf = (agentId: string) => {
-    const agent = workflow.agents.find((a) => a.id === agentId);
+  const scopePrefix = `${workflow.id}_`;
+  const roleOf = (stepAgent: string) => {
+    const agentId = stepAgent.startsWith(scopePrefix) ? stepAgent.slice(scopePrefix.length) : stepAgent;
+    const agent = workflow.agents.find((a) => a.id === stepAgent) ?? workflow.agents.find((a) => a.id === agentId);
     return agent?.role ?? inferRole(agentId);
   };
   workflow.steps.forEach((step, i) => {
-    const scopedAgentId = step.agent.startsWith(`${workflow.id}_`) ? step.agent : `${workflow.id}_${step.agent}`;
+    const scopedAgentId = step.agent.startsWith(scopePrefix) ? step.agent : `${scopePrefix}${step.agent}`;
     insertStep.run(
       crypto.randomUUID(),
       runId,

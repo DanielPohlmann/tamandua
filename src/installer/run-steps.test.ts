@@ -47,6 +47,17 @@ describe("insertRunSteps", () => {
     assert.deepEqual(roles.map((r) => r.agent_role), ["coding", "verification", "coding"]);
   });
 
+  it("resolves the agent role for steps that name an already scoped agent id", () => {
+    const workflow = {
+      ...WORKFLOW,
+      agents: [{ id: "reviewer", role: "verification", workspace: { baseDir: "x" } }],
+      steps: WORKFLOW.steps.map((step) => (step.id === "gate-review" ? { ...step, agent: "wf_reviewer" } : step)),
+    };
+    insertRunSteps(workflow as never, "run-1", new Date().toISOString());
+    const row = getDb().prepare("SELECT agent_id, agent_role FROM steps WHERE run_id = 'run-1' AND step_id = 'gate-review'").get() as { agent_id: string; agent_role: string };
+    assert.deepEqual({ ...row }, { agent_id: "wf_reviewer", agent_role: "verification" });
+  });
+
   it("seeds engine and workflow context defaults", () => {
     const defaults = buildEngineContextDefaults(WORKFLOW as never);
     assert.equal(defaults.base_branch, "develop");
