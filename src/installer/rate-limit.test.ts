@@ -9,6 +9,7 @@ import {
   requeueClaimedSteps,
   pauseRunForRateLimit,
   resumeDueRateLimitedRuns,
+  suspendRunForRateLimit,
 } from "../../dist/installer/rate-limit.js";
 import { executePollingRound } from "../../dist/installer/agent-scheduler.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
@@ -27,6 +28,24 @@ describe("parseRateLimitWait", () => {
     assert.equal(parseRateLimitWait("try again in 0", now), 60_000);
   });
 
+  it("accepts reset phrasing without minutes and ignores a trailing timezone", () => {
+    assert.equal(parseRateLimitWait("You've hit your limit · resets 3pm (America/Sao_Paulo)", now), 60 * 60_000);
+    assert.equal(parseRateLimitWait("limit reached, resets at 2:30 PM", now), 30 * 60_000);
+    assert.equal(parseRateLimitWait("resets 2pm", now), 24 * 60 * 60_000);
+  });
+
+  it("accepts the epoch seconds suffix form", () => {
+    const epoch = Math.floor(now.getTime() / 1000) + 2 * 3600;
+    assert.equal(parseRateLimitWait(`Claude AI usage limit reached|${epoch}`, now), 2 * 3600_000);
+    assert.equal(parseRateLimitWait(`Claude AI usage limit reached|${epoch - 10 * 3600}`, now), 60_000);
+  });
+
+  it("honours hour and second units", () => {
+    assert.equal(parseRateLimitWait("try again in 2 hours", now), 2 * 3600_000);
+    assert.equal(parseRateLimitWait("try again in 90 seconds", now), 90_000);
+    assert.equal(parseRateLimitWait("try again in 10 seconds", now), 60_000);
+  });
+
   it("returns null for unrelated text", () => {
     assert.equal(parseRateLimitWait("all tests passed", now), null);
   });
@@ -35,6 +54,7 @@ describe("parseRateLimitWait", () => {
     assert.equal(rateLimitFromClaudeResult('{"type":"result","is_error":true,"result":"Usage limit reached, try again in 5"}', now), 5 * 60_000);
     assert.equal(rateLimitFromClaudeResult('{"type":"result","is_error":false,"result":"I will wait 5 minutes"}', now), null);
     assert.equal(rateLimitFromClaudeResult("not json", now), null);
+    assert.equal(rateLimitFromClaudeResult("Done. I will wait 5 minutes before the next step", now), null);
   });
 });
 
@@ -60,6 +80,44 @@ describe("pause and resume", () => {
     requeueClaimedSteps("run-1", "wf_reviewer", "job-1");
     const row = getDb().prepare("SELECT worktree_baseline FROM steps WHERE id = 's-review'").get() as { worktree_baseline: string | null };
     assert.equal(row.worktree_baseline, null);
+  });
+
+  it("never marks a drain-pausing run for auto-resume", () => {
+    getDb().prepare("UPDATE runs SET scheduling_status = 'draining_pause' WHERE id = 'run-1'").run();
+    pauseRunForRateLimit("run-1", new Date(Date.now() + 60_000), "rate limited");
+    const run = getDb().prepare("SELECT status, context FROM runs WHERE id = 'run-1'").get() as { status: string; context: string };
+    assert.equal(run.status, "running");
+    assert.equal(JSON.parse(run.context).rate_limit_resume_at, undefined);
+  });
+
+  it("never marks an already human-paused run for auto-resume", () => {
+    getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = 'run-1'").run();
+    pauseRunForRateLimit("run-1", new Date(Date.now() + 60_000), "rate limited");
+    const run = getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string };
+    assert.equal(JSON.parse(run.context).rate_limit_resume_at, undefined);
+  });
+
+  it("keeps the later resume time when a marker already exists", () => {
+    const later = new Date(Date.now() + 3600_000);
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ rate_limit_resume_at: later.toISOString() }));
+    pauseRunForRateLimit("run-1", new Date(Date.now() + 60_000), "rate limited");
+    const run = getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string };
+    assert.equal(JSON.parse(run.context).rate_limit_resume_at, later.toISOString());
+  });
+
+  it("suspends the run and re-queues the step in one call", () => {
+    assert.equal(suspendRunForRateLimit("run-1", "wf_reviewer", "job-1", new Date(Date.now() + 60_000), "rate limited"), 1);
+    const step = getDb().prepare("SELECT status FROM steps WHERE id = 's-review'").get() as { status: string };
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(step.status, "pending");
+    assert.equal(run.status, "paused");
+  });
+
+  it("skips a malformed row without aborting the others", () => {
+    seedRun(getDb(), { id: "run-bad", status: "paused" }, []);
+    getDb().prepare("UPDATE runs SET context = 'not json' WHERE id = 'run-bad'").run();
+    pauseRunForRateLimit("run-1", new Date(Date.now() - 1000), "rate limited");
+    assert.deepEqual(resumeDueRateLimitedRuns(new Date()), ["run-1"]);
   });
 
   it("pauses the run until the reset and resumes it once due", () => {

@@ -11,7 +11,7 @@ import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
 import { emitEvent } from "./events.js";
 import { claudeDisallowedTools } from "./read-only.js";
-import { RateLimitError, parseRateLimitWait, rateLimitFromClaudeResult, requeueClaimedSteps, pauseRunForRateLimit } from "./rate-limit.js";
+import { RateLimitError, parseRateLimitWait, rateLimitFromClaudeResult, suspendRunForRateLimit } from "./rate-limit.js";
 import { parsePiOutputStream } from "./pi-stream-parser.js";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1817,8 +1817,7 @@ export async function executePollingRound(
   } catch (err) {
     if (err instanceof RateLimitError) {
       const resumeAt = new Date(Date.now() + err.waitMs);
-      const requeued = requeueClaimedSteps(job.runId, job.agentId, job.id);
-      pauseRunForRateLimit(job.runId, resumeAt, err.message);
+      const requeued = suspendRunForRateLimit(job.runId, job.agentId, job.id, resumeAt, err.message);
       logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
       return;
     }
