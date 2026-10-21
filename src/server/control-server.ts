@@ -780,6 +780,8 @@ export function startReconciler(): { stop: () => void } {
   async function tick(): Promise<void> {
     if (stopped) return;
     try {
+      const { resumeDueRateLimitedRuns } = await import("../installer/rate-limit.js");
+      resumeDueRateLimitedRuns();
       const db = getDb();
       const desired = db
         .prepare(

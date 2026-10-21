@@ -11,6 +11,7 @@ import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
 import { emitEvent } from "./events.js";
 import { claudeDisallowedTools } from "./read-only.js";
+import { RateLimitError, parseRateLimitWait, rateLimitFromClaudeResult, requeueClaimedSteps, pauseRunForRateLimit } from "./rate-limit.js";
 import { parsePiOutputStream } from "./pi-stream-parser.js";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -781,6 +782,12 @@ export async function runClaude(
           stderrPreview: failureStderrMeta.preview,
           stderrTruncated: failureStderrMeta.truncated,
         });
+        const rateLimitWait = parseRateLimitWait(`${stdoutPieces.join("")}
+${failureStderr}`);
+        if (rateLimitWait !== null) {
+          reject(new RateLimitError(rateLimitWait, `claude usage limit reached; retry in ${Math.round(rateLimitWait / 60_000)} min`));
+          return;
+        }
         const stderrSuffix = failureStderr ? `\nstderr: ${failureStderr}` : "";
         reject(new Error(`claude failed: exited with code ${code}${signal ? ` (signal ${signal})` : ""}${stderrSuffix}`));
       }
@@ -789,6 +796,10 @@ export async function runClaude(
 
   const durationMs = Date.now() - startedAt;
   const rawStdout = stdoutPieces.join("").trim();
+  const resultRateLimitWait = rateLimitFromClaudeResult(rawStdout);
+  if (resultRateLimitWait !== null) {
+    throw new RateLimitError(resultRateLimitWait, `claude usage limit reached; retry in ${Math.round(resultRateLimitWait / 60_000)} min`);
+  }
   const stderrOut = stderrPieces.join("");
   const stderrMeta = buildStreamLogMetadata(stderrOut);
 
@@ -1804,6 +1815,13 @@ export async function executePollingRound(
       }
     }
   } catch (err) {
+    if (err instanceof RateLimitError) {
+      const resumeAt = new Date(Date.now() + err.waitMs);
+      const requeued = requeueClaimedSteps(job.runId, job.agentId, job.id);
+      pauseRunForRateLimit(job.runId, resumeAt, err.message);
+      logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
+      return;
+    }
     const errorMessage = err instanceof Error ? err.message : String(err);
     const errorSummary = buildBoundedPreview(errorMessage, MAX_POLLING_ERROR_PREVIEW);
 
