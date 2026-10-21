@@ -10,6 +10,7 @@ import {
   snapshotWorktree,
   recordReadOnlyBaseline,
   enforceReadOnly,
+  absentAtBaseline,
 } from "../../dist/installer/read-only.js";
 import { claimStep, completeStep, failStep, recoverOrphanedStepsForAgent, cleanupAbandonedSteps } from "../../dist/installer/step-ops.js";
 import { requeueClaimedSteps } from "../../dist/installer/rate-limit.js";
@@ -39,6 +40,16 @@ describe("read-only role policy", () => {
       assert.equal(isReadOnlyRole(role), false, String(role));
       assert.deepEqual(claudeDisallowedTools(role), []);
     }
+  });
+});
+
+describe("absentAtBaseline", () => {
+  const entry = (line: string, alsoUntracked = false) => ({ line, untracked: false, indexCode: line[0], alsoUntracked });
+
+  it("judges absence from the porcelain codes, not from a missing hash", () => {
+    for (const line of [" D", "D ", "AD", "R~"]) assert.equal(absentAtBaseline(entry(line)), true, line);
+    for (const line of [" M", "M ", "MM", "A ", " T"]) assert.equal(absentAtBaseline(entry(line)), false, line);
+    assert.equal(absentAtBaseline(entry("D ", true)), false);
   });
 });
 
@@ -144,6 +155,34 @@ describe("enforceReadOnly", () => {
     assert.equal(git("show", ":a.txt"), "a-staged\n");
     assert.equal(fs.existsSync(path.join(repo, name)), false);
     assert.equal(fs.readFileSync(path.join(quarantineDir(), name), "utf-8"), "g\n");
+  });
+
+  it("never quarantines a tracked non-regular path that existed at baseline (submodule)", () => {
+    const sub = path.join(repo, "sub");
+    fs.mkdirSync(sub);
+    initRepo(sub);
+    git("add", "sub");
+    git("commit", "-qm", "add gitlink");
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "moved"], { cwd: sub, stdio: "pipe" });
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty so the baseline has a stash\n");
+    claim();
+    git("add", "sub");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(fs.existsSync(path.join(sub, ".git")), true);
+    assert.equal(fs.readFileSync(path.join(sub, "tracked.txt"), "utf-8"), "v1\n");
+    assert.equal(fs.existsSync(path.join(quarantineDir(), "sub")), false);
+    assert.equal(git("status", "--porcelain", "--", "sub").slice(0, 2), " M");
+    const [finding] = listFindings("run-1");
+    assert.doesNotMatch(finding.evidence, /Could not restore|moved \(not deleted\)/);
+  });
+
+  it("restores the untracked content of a path whose index entry was already removed at baseline (D + ??)", () => {
+    git("rm", "--cached", "-q", "tracked.txt");
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "untracked at claim\n");
+    claim();
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "step version\n");
+    assert.equal(violation()?.status, "blocked");
+    assert.equal(read("tracked.txt"), "untracked at claim\n");
   });
 
   it("restores a tracked file whose index entry was removed while the file stayed (D + ??)", () => {

@@ -55,6 +55,8 @@ interface StatusEntry {
   line: string;
   untracked: boolean;
   indexCode: string;
+  /** A tracked record whose path is also listed untracked (e.g. removed from the index, file kept). */
+  alsoUntracked?: boolean;
 }
 
 interface WorktreeSnapshot {
@@ -72,7 +74,11 @@ function parseStatus(raw: string): Record<string, StatusEntry> {
     if (record.length < 4) continue;
     const code = record.slice(0, 2);
     const file = record.slice(3);
-    if (!(entries[file] && !entries[file].untracked && code === "??")) {
+    const existing = entries[file];
+    if (existing && existing.untracked !== (code === "??")) {
+      const tracked = existing.untracked ? { line: code, untracked: false, indexCode: code[0] } : existing;
+      entries[file] = { ...tracked, alsoUntracked: true };
+    } else {
       entries[file] = { line: code, untracked: code === "??", indexCode: code[0] };
     }
     const renamedOrCopied = "RC".includes(code[0]) || "RC".includes(code[1]);
@@ -235,8 +241,17 @@ function restoreTracked(cwd: string, file: string, before: StatusEntry, baseline
   else if (before.indexCode === "D") git(cwd, ["rm", "--cached", "-q", "--ignore-unmatch", "--", file]);
   else git(cwd, ["checkout", `${stash}^2`, "--", file]);
 
-  if (baseline.hashes[file] === undefined) quarantine.move(file);
+  if (absentAtBaseline(before)) quarantine.move(file);
   else git(cwd, ["restore", `--source=${stash}`, "--worktree", "--", file]);
+}
+
+/**
+ * Whether a tracked baseline entry had no file in the worktree, read from its porcelain codes. A missing
+ * hash says nothing: symlinks and submodules are never hashed.
+ */
+export function absentAtBaseline(entry: StatusEntry): boolean {
+  if (entry.line === RENAMED_SOURCE || entry.line[1] === "D") return true;
+  return entry.line[0] === "D" && !entry.alsoUntracked;
 }
 
 function revertPath(cwd: string, file: string, baseline: WorktreeSnapshot, current: WorktreeSnapshot, quarantine: Quarantine): void {
