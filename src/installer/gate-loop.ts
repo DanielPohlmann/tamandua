@@ -45,6 +45,7 @@ export type GateSettlement = { status: "fixing" | "blocked"; detail: string } | 
 export interface BudgetOverrides {
   maxRounds?: number;
   maxFixRounds?: number;
+  maxTokens?: number;
 }
 
 export function serializeFixPolicy(onFail: WorkflowStepFailure | undefined): string | null {
@@ -293,6 +294,9 @@ export function prepareBlockedRunResume(
     }
     if (overrides.maxFixRounds !== undefined) {
       db.prepare("UPDATE runs SET max_fix_rounds = ? WHERE id = ?").run(overrides.maxFixRounds, runId);
+    }
+    if (overrides.maxTokens !== undefined) {
+      db.prepare("UPDATE runs SET max_tokens = ? WHERE id = ?").run(overrides.maxTokens, runId);
     }
     delete context.blocked_step;
     delete context.blocked_reason;

@@ -303,11 +303,11 @@ export async function runWorkflow(
   // (and/or reconciler) can admit them.
   db.prepare(
     `INSERT INTO runs (id, run_number, workflow_id, task, status, context, tokens_spent,
-                       scheduling_status, scheduling_requested_at, notify_url, max_fix_rounds,
+                       scheduling_status, scheduling_requested_at, notify_url, max_fix_rounds, max_tokens,
                        created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?, ?)`,
   ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyUrl ?? null,
-    workflow.budgets?.max_fix_rounds ?? DEFAULT_MAX_FIX_ROUNDS, now, now);
+    workflow.budgets?.max_fix_rounds ?? DEFAULT_MAX_FIX_ROUNDS, workflow.budgets?.max_tokens ?? null, now, now);
 
   insertRunSteps(workflow, runId, now);
 
@@ -443,6 +443,7 @@ export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON
 interface BlockedRunSnapshot {
   run: {
     status: string; context: string; max_fix_rounds: number | null; max_rounds_override: number | null;
+    max_tokens: number | null;
     scheduling_status: string | null; scheduling_requested_at: string | null; scheduling_error: string | null;
   };
   step: { status: string; fix_rounds: number } | undefined;
@@ -452,7 +453,7 @@ interface BlockedRunSnapshot {
 function snapshotBlockedRun(runId: string, context: string): BlockedRunSnapshot {
   const db = getDb();
   const run = db.prepare(
-    `SELECT status, context, max_fix_rounds, max_rounds_override, scheduling_status, scheduling_requested_at,
+    `SELECT status, context, max_fix_rounds, max_rounds_override, max_tokens, scheduling_status, scheduling_requested_at,
             scheduling_error FROM runs WHERE id = ?`,
   ).get(runId) as BlockedRunSnapshot["run"];
   const stepName = (JSON.parse(context) as Record<string, string>).blocked_step;
@@ -465,9 +466,9 @@ function restoreBlockedRun(runId: string, snapshot: BlockedRunSnapshot, message:
   const db = getDb();
   const { run, step, stepName } = snapshot;
   db.prepare(
-    `UPDATE runs SET status = ?, context = ?, max_fix_rounds = ?, max_rounds_override = ?, scheduling_status = NULL,
+    `UPDATE runs SET status = ?, context = ?, max_fix_rounds = ?, max_rounds_override = ?, max_tokens = ?, scheduling_status = NULL,
             scheduling_requested_at = ?, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?`,
-  ).run(run.status, run.context, run.max_fix_rounds, run.max_rounds_override, run.scheduling_requested_at, message, runId);
+  ).run(run.status, run.context, run.max_fix_rounds, run.max_rounds_override, run.max_tokens, run.scheduling_requested_at, message, runId);
   if (step) {
     db.prepare("UPDATE steps SET status = ?, fix_rounds = ?, updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
       .run(step.status, step.fix_rounds, runId, stepName);

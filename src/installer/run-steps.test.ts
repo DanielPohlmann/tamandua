@@ -137,6 +137,15 @@ describe("blocked run resume", () => {
     assert.equal((await resumeBlockedRun("run-1", {}, okDeps(200) as never)).status, "resumed");
   });
 
+  it("restores max_tokens when registration fails after a maxTokens override", async () => {
+    seedBlockedGate();
+    getDb().prepare("UPDATE runs SET max_tokens = 1000 WHERE id = 'run-1'").run();
+    await assert.rejects(resumeBlockedRun("run-1", { maxTokens: 9000 }, okDeps(503) as never), /daemon down/);
+    const run = getDb().prepare("SELECT status, max_tokens FROM runs WHERE id = 'run-1'").get() as
+      { status: string; max_tokens: number };
+    assert.deepEqual({ ...run }, { status: "blocked", max_tokens: 1000 });
+  });
+
   it("makes a blocked fix step claimable again", () => {
     seedRun(getDb(), { id: "run-1", status: "blocked", context: { blocked_step: "fix" } }, [
       { id: "s-impl", stepId: "implement", index: 0, status: "done" },

@@ -929,6 +929,19 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
   if (runStatus?.status !== "running") return { found: false };
 
+  const budget = db.prepare("SELECT tokens_spent, max_tokens FROM runs WHERE id = ?").get(step.run_id) as
+    { tokens_spent: number; max_tokens: number | null };
+  if (budget.max_tokens !== null && budget.tokens_spent >= budget.max_tokens) {
+    blockRunAtStep({
+      runId: step.run_id,
+      stepDbId: step.id,
+      stepName: step.step_id,
+      reason: `Token budget exhausted (${budget.tokens_spent}/${budget.max_tokens})`,
+      output: step.output ?? "",
+    });
+    return { found: false };
+  }
+
   // Build context via resolveStepContext
   const context = resolveStepContext(step.run_id, step.step_index);
 
