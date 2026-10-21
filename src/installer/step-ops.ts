@@ -91,6 +91,35 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "blocked_reason",
 ]);
 
+/** Gate env inputs the plan step sets once; later step output cannot rewrite them. */
+const WRITE_ONCE_CONTEXT_KEYS = new Set(["branch", "feature_complete"]);
+/** Declared context keys a step legitimately updates (the review verifier records what it reviewed). */
+const STEP_UPDATABLE_DECLARED_KEYS = new Set(["reviewed_sha"]);
+
+/** Keys the workflow declared under `context:`, as persisted for the bash-gate env allowlist. */
+export function parseDeclaredContextKeys(context: Record<string, string>): string[] {
+  const raw = context[BASH_ENV_KEYS_CONTEXT_KEY];
+  if (!raw) return [];
+  try {
+    const keys: unknown = JSON.parse(raw);
+    return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bash gates read their env from the run context, so step output must not be
+ * able to rewrite the inputs they trust: engine-reserved keys, base_branch and
+ * workflow-declared keys are fixed, and branch/feature_complete are first-writer-wins.
+ */
+function isProtectedFromStepOutput(key: string, context: Record<string, string>): boolean {
+  if (RESERVED_CONTEXT_KEYS.has(key)) return true;
+  if (WRITE_ONCE_CONTEXT_KEYS.has(key)) return (context[key] ?? "") !== "";
+  if (STEP_UPDATABLE_DECLARED_KEYS.has(key)) return false;
+  return key === "base_branch" || parseDeclaredContextKeys(context).includes(key);
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Template Resolution
 // ══════════════════════════════════════════════════════════════════════
@@ -1343,7 +1372,7 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const isGate = parseFixPolicy(step.on_fail) !== null && step.type === "single";
   const parsed = parseOutputKeyValues(output);
   for (const [key, value] of Object.entries(parsed)) {
-    if (RESERVED_CONTEXT_KEYS.has(key)) continue;
+    if (isProtectedFromStepOutput(key, context)) continue;
     if (isGate && key === "findings_json") continue;
     context[key] = value;
   }
@@ -2048,7 +2077,7 @@ export function resolveStepContext(
     if (prev.output) {
       const parsed = parseOutputKeyValues(prev.output);
       for (const [key, value] of Object.entries(parsed)) {
-        if (!RESERVED_CONTEXT_KEYS.has(key)) {
+        if (!isProtectedFromStepOutput(key, context)) {
           context[key] = value;
         }
       }

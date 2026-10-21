@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { getDb, closeDb } from "../../dist/db.js";
-import { claimStep, completeStep, completeBashStep, advancePipeline } from "../../dist/installer/step-ops.js";
+import { claimStep, completeStep, completeBashStep, advancePipeline, resolveStepContext } from "../../dist/installer/step-ops.js";
 import { getRunEvents } from "../../dist/installer/events.js";
 import { resumeBlockedRun } from "../../dist/installer/run.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
@@ -331,5 +331,69 @@ describe("engine-owned context keys", () => {
     assert.equal(context.blocked_step, undefined);
     assert.equal(context.blocked_reason, "engine");
     assert.equal(context.status, "done");
+  });
+});
+
+describe("gate environment inputs in the run context", () => {
+  let home: TempTamanduaHome;
+  const runContext = () =>
+    JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-step-ops-gate-env-");
+    seedRun(getDb(), {
+      id: "run-1",
+      context: {
+        base_branch: "develop",
+        reviewed_sha: "",
+        deploy_target: "staging",
+        __env_keys: JSON.stringify(["base_branch", "reviewed_sha", "deploy_target"]),
+      },
+    }, [
+      { id: "s-plan", stepId: "load-plan", index: 0, status: "running", agentId: "wf_planner" },
+      { id: "s-review", stepId: "gate-review", index: 1, status: "waiting", agentId: "wf_reviewer" },
+      { id: "s-pr", stepId: "pr", index: 2, status: "waiting", agentId: "wf_pr" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("lets the plan step set the branch and feature flag while they are still empty", () => {
+    completeStep("s-plan", "STATUS: done\nBRANCH: feature/orders\nFEATURE_COMPLETE: true");
+    const context = runContext();
+    assert.equal(context.branch, "feature/orders");
+    assert.equal(context.feature_complete, "true");
+  });
+
+  it("keeps declared keys, base_branch, branch and feature_complete when a later step prints them", () => {
+    completeStep("s-plan", "STATUS: done\nBRANCH: feature/orders\nFEATURE_COMPLETE: true");
+    getDb().prepare("UPDATE steps SET status = 'running' WHERE id = 's-review'").run();
+    completeStep("s-review", [
+      "STATUS: done",
+      "BASE_BRANCH: HEAD",
+      "FEATURE_COMPLETE: false",
+      "BRANCH: x",
+      "DEPLOY_TARGET: production",
+      "REVIEWED_SHA: abc123",
+    ].join("\n"));
+
+    const context = runContext();
+    assert.equal(context.base_branch, "develop");
+    assert.equal(context.feature_complete, "true");
+    assert.equal(context.branch, "feature/orders");
+    assert.equal(context.deploy_target, "staging");
+    assert.equal(context.reviewed_sha, "abc123", "the review verifier still records what it reviewed");
+
+    const resolved = resolveStepContext("run-1", 2);
+    assert.equal(resolved.base_branch, "develop");
+    assert.equal(resolved.feature_complete, "true");
+    assert.equal(resolved.branch, "feature/orders");
+    assert.equal(resolved.deploy_target, "staging");
+    assert.equal(resolved.reviewed_sha, "abc123");
+  });
+
+  it("protects base_branch even when the workflow declares no context keys", () => {
+    getDb().prepare("UPDATE runs SET context = ? WHERE id = 'run-1'").run(JSON.stringify({ base_branch: "main" }));
+    completeStep("s-plan", "STATUS: done\nBASE_BRANCH: HEAD");
+    assert.equal(runContext().base_branch, "main");
   });
 });
