@@ -10,6 +10,8 @@ import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
 import { emitEvent } from "./events.js";
+import { claudeDisallowedTools } from "./read-only.js";
+import { RateLimitError, rateLimitFromClaudeResult, rateLimitFromFailedRun, suspendRunForRateLimit } from "./rate-limit.js";
 import { parsePiOutputStream } from "./pi-stream-parser.js";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -223,6 +225,8 @@ export interface RunPiOptions {
   env?: Record<string, string>;
   /** Optional model passed to `claude --model` (claude harness only). */
   model?: string;
+  /** Claude tools denied to this invocation (claude harness only). */
+  disallowedTools?: string[];
   /**
    * Optional callback invoked once the child process is spawned. Used by
    * `executePollingRound` to register the child + pgid in `inFlightChildren`
@@ -639,6 +643,24 @@ export async function runHermes(
 
 // ── Claude Code execution ─────────────────────────────────────────
 
+export function buildClaudeArgs(
+  prompt: string,
+  options: { model?: string; disallowedTools?: string[] },
+): string[] {
+  const args = [
+    "-p", prompt,
+    "--output-format", "json",
+    "--dangerously-skip-permissions",
+  ];
+  if (options.model && options.model !== "default") {
+    args.push("--model", options.model);
+  }
+  if (options.disallowedTools && options.disallowedTools.length > 0) {
+    args.push("--disallowedTools", options.disallowedTools.join(","));
+  }
+  return args;
+}
+
 export async function runClaude(
   prompt: string,
   options: RunPiOptions = {},
@@ -658,14 +680,7 @@ export async function runClaude(
   // --output-format json            single JSON result object (result + usage)
   // --dangerously-skip-permissions  no interactive prompts (background agent)
   // --model <m>                     only when a concrete model is requested
-  const args = [
-    "-p", prompt,
-    "--output-format", "json",
-    "--dangerously-skip-permissions",
-  ];
-  if (options.model && options.model !== "default") {
-    args.push("--model", options.model);
-  }
+  const args = buildClaudeArgs(prompt, options);
 
   const preview = formatPiCommandPreview(claudePath, args);
   logger.info("claude pre-launch", {
@@ -767,6 +782,11 @@ export async function runClaude(
           stderrPreview: failureStderrMeta.preview,
           stderrTruncated: failureStderrMeta.truncated,
         });
+        const rateLimitWait = rateLimitFromFailedRun(failureStderr, stdoutPieces.join(""));
+        if (rateLimitWait !== null) {
+          reject(new RateLimitError(rateLimitWait, `claude usage limit reached; retry in ${Math.round(rateLimitWait / 60_000)} min`));
+          return;
+        }
         const stderrSuffix = failureStderr ? `\nstderr: ${failureStderr}` : "";
         reject(new Error(`claude failed: exited with code ${code}${signal ? ` (signal ${signal})` : ""}${stderrSuffix}`));
       }
@@ -775,6 +795,10 @@ export async function runClaude(
 
   const durationMs = Date.now() - startedAt;
   const rawStdout = stdoutPieces.join("").trim();
+  const resultRateLimitWait = rateLimitFromClaudeResult(rawStdout);
+  if (resultRateLimitWait !== null) {
+    throw new RateLimitError(resultRateLimitWait, `claude usage limit reached; retry in ${Math.round(resultRateLimitWait / 60_000)} min`);
+  }
   const stderrOut = stderrPieces.join("");
   const stderrMeta = buildStreamLogMetadata(stderrOut);
 
@@ -1562,6 +1586,33 @@ export function buildPollingRoundContext(
   };
 }
 
+/**
+ * Pauses the run for a usage limit. False means the round was not suspended (pause cap reached or the
+ * suspension itself failed) and the caller must take the normal failure/recovery path.
+ */
+export function suspendRoundForRateLimit(
+  job: Pick<CronJobInfo, "id" | "runId" | "agentId">,
+  context: Record<string, unknown>,
+  err: RateLimitError,
+): boolean {
+  const resumeAt = new Date(Date.now() + err.waitMs);
+  try {
+    const requeued = suspendRunForRateLimit(job.runId, job.agentId, job.id, resumeAt, err.message);
+    if (requeued === null) {
+      logger.warn("Usage limit hit repeatedly without progress — handling it as a failure", { ...context });
+      return false;
+    }
+    logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
+    return true;
+  } catch (suspendErr) {
+    logger.error("Could not pause the run for a usage limit — handling it as a failure", {
+      ...context,
+      error: suspendErr instanceof Error ? suspendErr.message : String(suspendErr),
+    });
+    return false;
+  }
+}
+
 export async function executePollingRound(
   job: CronJobInfo,
   agent: WorkflowAgent,
@@ -1710,6 +1761,7 @@ export async function executePollingRound(
         timeout,
         workdir: workingDirectoryForHarness,
         model: claudeModel,
+        disallowedTools: claudeDisallowedTools(role),
         env: {
           TAMANDUA_WORKER_JOB_ID: job.id,
           TAMANDUA_WORKER_PID: String(process.pid),
@@ -1789,6 +1841,7 @@ export async function executePollingRound(
       }
     }
   } catch (err) {
+    if (err instanceof RateLimitError && suspendRoundForRateLimit(job, context, err)) return;
     const errorMessage = err instanceof Error ? err.message : String(err);
     const errorSummary = buildBoundedPreview(errorMessage, MAX_POLLING_ERROR_PREVIEW);
 

@@ -24,6 +24,9 @@ import {
   tailLines,
 } from "./gate-loop.js";
 import { parseFindingsJson } from "./findings.js";
+import { detectOpenedPr } from "./notifications.js";
+import { enforceReadOnly, recordReadOnlyBaseline } from "./read-only.js";
+import { RATE_LIMIT_PAUSES_KEY, RATE_LIMIT_RESUME_KEY, resetRateLimitPauses } from "./rate-limit.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Key-Value Parsing
@@ -66,8 +69,9 @@ export function parseOutputKeyValues(output: string): Record<string, string> {
 
 /**
  * Reserved context keys that must not be overwritten by step output parsing.
- * These are structural keys that define the harness/repo/environment and should
- * only be set during run creation, not by agent-generated KEY:value output.
+ * These are structural keys that define the harness/repo/environment, set only
+ * during run creation, or engine-owned state (rate-limit pauses, block records)
+ * that agent-generated KEY:value output must never forge.
  */
 const RESERVED_CONTEXT_KEYS = new Set([
   "repo",
@@ -81,6 +85,10 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "worktree_origin_sha",
   "original_branch",
   BASH_ENV_KEYS_CONTEXT_KEY,
+  RATE_LIMIT_RESUME_KEY,
+  RATE_LIMIT_PAUSES_KEY,
+  "blocked_step",
+  "blocked_reason",
 ]);
 
 // ══════════════════════════════════════════════════════════════════════
@@ -870,6 +878,7 @@ interface ClaimResult {
  * Throttle cleanupAbandonedSteps: run at most once every 5 minutes.
  */
 let lastCleanupTime = 0;
+const INTERRUPTED_RUN_OUTPUT = "<re-claim after interrupted run>";
 const CLEANUP_THROTTLE_MS = 5 * 60 * 1000;
 
 /**
@@ -894,7 +903,8 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   // Run-scoped claim: concurrent runs of the same workflow + agent never
   // cross-claim because the WHERE clause pins to a specific run_id.
   const step = db.prepare(
-    `SELECT s.id, s.step_id, s.run_id, s.input_template, s.type, s.loop_config, s.step_index, s.retry_count, s.output
+    `SELECT s.id, s.step_id, s.run_id, s.input_template, s.type, s.loop_config, s.step_index, s.retry_count, s.output,
+            s.agent_role, s.worktree_baseline, s.fix_rounds
      FROM steps s
      JOIN runs r ON r.id = s.run_id
      WHERE s.agent_id = ? AND s.run_id = ? AND s.status = 'pending'
@@ -920,6 +930,9 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
     step_index: number;
     retry_count: number;
     output: string | null;
+    agent_role: string | null;
+    worktree_baseline: string | null;
+    fix_rounds: number;
   } | undefined;
 
   if (!step) return { found: false };
@@ -927,6 +940,25 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   // Guard: don't claim work for a terminal/paused run
   const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
   if (runStatus?.status !== "running") return { found: false };
+
+  // A baseline that survived to a re-claim means the previous attempt was interrupted
+  // (re-queue, timeout, orphan, abandon) before its writes were checked.
+  if (step.worktree_baseline !== null && enforceReadOnly(step, INTERRUPTED_RUN_OUTPUT)) {
+    return { found: false };
+  }
+
+  const budget = db.prepare("SELECT tokens_spent, max_tokens FROM runs WHERE id = ?").get(step.run_id) as
+    { tokens_spent: number; max_tokens: number | null };
+  if (budget.max_tokens !== null && budget.tokens_spent >= budget.max_tokens) {
+    blockRunAtStep({
+      runId: step.run_id,
+      stepDbId: step.id,
+      stepName: step.step_id,
+      reason: `Token budget exhausted (${budget.tokens_spent}/${budget.max_tokens})`,
+      output: step.output ?? "",
+    });
+    return { found: false };
+  }
 
   // Build context via resolveStepContext
   const context = resolveStepContext(step.run_id, step.step_index);
@@ -1025,6 +1057,8 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
       ).run(
         ...(workerOwnership ? [nextStory.id, workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [nextStory.id, step.id])
       );
+      const loopRoleRow = db.prepare("SELECT agent_role FROM steps WHERE id = ?").get(step.id) as { agent_role: string | null };
+      recordReadOnlyBaseline(step.id, loopRoleRow.agent_role, context["repo"]);
 
       const wfId = getWorkflowId(step.run_id);
       emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: wfId, stepId: step.step_id, agentId });
@@ -1095,6 +1129,8 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
     ...(workerOwnership ? [workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [step.id])
   );
   if ((claim.changes ?? 0) <= 0) return { found: false };
+  const roleRow = db.prepare("SELECT agent_role FROM steps WHERE id = ?").get(step.id) as { agent_role: string | null };
+  recordReadOnlyBaseline(step.id, roleRow.agent_role, context["repo"]);
   emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: getWorkflowId(step.run_id), stepId: step.step_id, agentId });
   logger.info(`Step claimed by ${agentId}`, { runId: step.run_id, stepId: step.step_id });
 
@@ -1208,16 +1244,17 @@ export function finalizeDrainingPause(runId: string): void {
   });
   if (hasInFlightStep) return;
 
-  // Finalize the pause: clear timers and set status to paused.
+  // Finalize the pause only for a run still running: a run blocked meanwhile stays blocked.
+  const paused = db.prepare(
+    "UPDATE runs SET status = 'paused', scheduling_status = 'paused', updated_at = datetime('now') WHERE id = ? AND status = 'running'",
+  ).run(runId);
+  if (Number(paused.changes) !== 1) return;
+
   import("./agent-scheduler.js")
     .then((m) => m.removeRunCrons(runId))
     .catch((err) => {
       logger.warn("finalizeDrainingPause: removeRunCrons failed", { runId, error: String(err) });
     });
-
-  db.prepare(
-    "UPDATE runs SET status = 'paused', scheduling_status = 'paused', updated_at = datetime('now') WHERE id = ?",
-  ).run(runId);
 
   emitEvent({
     ts: new Date().toISOString(),
@@ -1240,11 +1277,12 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, expects, input_template, on_fail, invoked_by, fix_rounds FROM steps WHERE id = ?"
+    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, expects, input_template, on_fail, invoked_by, fix_rounds, agent_role, worktree_baseline FROM steps WHERE id = ?"
   ).get(stepId) as {
     id: string; run_id: string; step_id: string; step_index: number; type: string;
     loop_config: string | null; current_story_id: string | null; expects: string;
     input_template: string | null; on_fail: string | null; invoked_by: string | null; fix_rounds: number;
+    agent_role: string | null; worktree_baseline: string | null;
   } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
@@ -1255,6 +1293,13 @@ export function completeStep(stepId: string, output: string): { status: string; 
   if (runCheck?.status === "failed" || runCheck?.status === "canceled") {
     return { status: "blocked" };
   }
+
+  const readOnlyViolation = enforceReadOnly(step, output);
+  if (readOnlyViolation) {
+    finalizeDrainingPause(runId);
+    return readOnlyViolation;
+  }
+  resetRateLimitPauses(runId, step.step_id);
 
   // Validate output against the expects column before accepting the step
   const validationError = validateExpects(output, step.expects);
@@ -1292,6 +1337,7 @@ export function completeStep(stepId: string, output: string): { status: string; 
   // Merge KEY: value lines into run context
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string };
   const context: Record<string, string> = JSON.parse(run.context);
+  const previousPr = context["pr"];
 
   const isGate = parseFixPolicy(step.on_fail) !== null && step.type === "single";
   const parsed = parseOutputKeyValues(output);
@@ -1304,6 +1350,11 @@ export function completeStep(stepId: string, output: string): { status: string; 
   db.prepare(
     "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
   ).run(JSON.stringify(context), runId);
+
+  const openedPr = detectOpenedPr(previousPr, context["pr"]);
+  if (openedPr) {
+    emitEvent({ ts: new Date().toISOString(), event: "run.pr_opened", runId, workflowId: getWorkflowId(runId), stepId: step.step_id, detail: openedPr });
+  }
 
   // Parse STORIES_JSON from output (any step, typically the planner)
   parseAndInsertStories(output, runId);
@@ -1824,8 +1875,12 @@ export async function failStep(stepId: string, error: string): Promise<{ status:
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT run_id, step_id, retry_count, max_retries, type, current_story_id FROM steps WHERE id = ?"
+    "SELECT id, run_id, step_id, retry_count, max_retries, type, current_story_id, agent_role, worktree_baseline, fix_rounds FROM steps WHERE id = ?"
   ).get(stepId) as {
+    id: string;
+    agent_role: string | null;
+    worktree_baseline: string | null;
+    fix_rounds: number;
     run_id: string;
     step_id: string;
     retry_count: number;
@@ -1835,6 +1890,13 @@ export async function failStep(stepId: string, error: string): Promise<{ status:
   } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
+
+  const readOnlyViolation = enforceReadOnly(step, error);
+  if (readOnlyViolation) {
+    finalizeDrainingPause(step.run_id);
+    return readOnlyViolation;
+  }
+  resetRateLimitPauses(step.run_id, step.step_id);
 
   // Loop step failure — per-story retry
   if (step.type === "loop" && step.current_story_id) {

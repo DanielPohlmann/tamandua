@@ -2,6 +2,8 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { getDb, closeDb } from "../../dist/db.js";
 import { claimStep, completeStep, completeBashStep, advancePipeline } from "../../dist/installer/step-ops.js";
+import { getRunEvents } from "../../dist/installer/events.js";
+import { resumeBlockedRun } from "../../dist/installer/run.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
 const GATE_EXPECTS = "regex:^STATUS: (done|retry|blocked)$";
@@ -251,5 +253,83 @@ describe("gate loop with the fix step in the middle of the pipeline", () => {
     completeStep(fixClaim.stepId!, "STATUS: done\nRESOLVED: []");
     assert.equal(status("gate-unit"), "pending");
     assert.equal(status("fix"), "waiting");
+  });
+});
+
+describe("pr opened event", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-pr-opened-");
+    seedRun(getDb(), { id: "run-1" }, [
+      { id: "s-pr", stepId: "pr", index: 0, status: "running" },
+      { id: "s-pr2", stepId: "pr-again", index: 1, status: "running" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("emits run.pr_opened when a step reports a new PR url", () => {
+    completeStep("s-pr", "STATUS: done\nPR: https://github.com/o/r/pull/12");
+    const events = getRunEvents("run-1").filter((e) => e.event === "run.pr_opened");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].detail, "https://github.com/o/r/pull/12");
+  });
+
+  it("does not emit again when the same PR url is reported twice", () => {
+    completeStep("s-pr", "STATUS: done\nPR: https://github.com/o/r/pull/12");
+    completeStep("s-pr2", "STATUS: done\nPR: https://github.com/o/r/pull/12");
+    assert.equal(getRunEvents("run-1").filter((e) => e.event === "run.pr_opened").length, 1);
+  });
+});
+
+describe("blocking while a drain-pause is in progress", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-step-ops-drain-block-");
+    seedRun(getDb(), { id: "run-1", context: { working_directory_for_harness: home.dir } }, [
+      { id: "s-review", stepId: "gate-review", index: 0, status: "running", agentId: "wf_reviewer", expects: GATE_EXPECTS, onFail: POLICY },
+      { id: "s-fix", stepId: "fix", index: 1, status: "waiting", agentId: "wf_developer" },
+    ]);
+    getDb().prepare("UPDATE runs SET scheduling_status = 'draining_pause' WHERE id = 'run-1'").run();
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("keeps the run blocked instead of finalizing the pause, and it stays resumable", async () => {
+    assert.equal(completeStep("s-review", "STATUS: blocked\nREASON: needs a human").status, "blocked");
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "blocked");
+    assert.equal(getRunEvents("run-1").some((e) => e.event === "run.paused"), false);
+
+    const deps = { ensureDaemon: async () => {}, register: async () => ({ status: 200, body: {} }) };
+    const resumed = await resumeBlockedRun("run-1", {}, deps as never);
+    assert.equal(resumed.status, "resumed");
+    assert.equal(status("gate-review"), "pending");
+  });
+});
+
+describe("engine-owned context keys", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-step-ops-reserved-");
+    seedRun(getDb(), { id: "run-1", context: { blocked_reason: "engine" } }, [
+      { id: "s-plan", stepId: "plan", index: 0, status: "running", agentId: "wf_planner" },
+      { id: "s-next", stepId: "next", index: 1, status: "waiting", agentId: "wf_developer" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("ignores agent output lines that would overwrite them", () => {
+    completeStep("s-plan", [
+      "STATUS: done",
+      "RATE_LIMIT_RESUME_AT: 2099-01-01T00:00:00.000Z",
+      "RATE_LIMIT_PAUSES: {\"plan\":0}",
+      "BLOCKED_STEP: next",
+      "BLOCKED_REASON: forged",
+    ].join("\n"));
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(context.rate_limit_resume_at, undefined);
+    assert.equal(context.rate_limit_pauses, undefined);
+    assert.equal(context.blocked_step, undefined);
+    assert.equal(context.blocked_reason, "engine");
+    assert.equal(context.status, "done");
   });
 });

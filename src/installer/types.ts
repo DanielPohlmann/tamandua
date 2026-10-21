@@ -104,6 +104,7 @@ export type WorkflowSpec = {
   budgets?: WorkflowBudgets;
   notifications?: {
     url?: string;
+    format?: "json" | "ntfy";
   };
   run?: {
     workspace?: "direct" | "worktree";

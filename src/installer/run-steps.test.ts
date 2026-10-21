@@ -40,6 +40,24 @@ describe("insertRunSteps", () => {
     assert.equal(rows[2].on_fail, null);
   });
 
+  it("persists the agent role used for read-only enforcement", () => {
+    const workflow = { ...WORKFLOW, agents: [{ id: "reviewer", role: "verification", workspace: { baseDir: "x" } }] };
+    insertRunSteps(workflow as never, "run-1", new Date().toISOString());
+    const roles = getDb().prepare("SELECT step_id, agent_role FROM steps WHERE run_id = 'run-1' ORDER BY step_index").all() as Array<{ step_id: string; agent_role: string }>;
+    assert.deepEqual(roles.map((r) => r.agent_role), ["coding", "verification", "coding"]);
+  });
+
+  it("resolves the agent role for steps that name an already scoped agent id", () => {
+    const workflow = {
+      ...WORKFLOW,
+      agents: [{ id: "reviewer", role: "verification", workspace: { baseDir: "x" } }],
+      steps: WORKFLOW.steps.map((step) => (step.id === "gate-review" ? { ...step, agent: "wf_reviewer" } : step)),
+    };
+    insertRunSteps(workflow as never, "run-1", new Date().toISOString());
+    const row = getDb().prepare("SELECT agent_id, agent_role FROM steps WHERE run_id = 'run-1' AND step_id = 'gate-review'").get() as { agent_id: string; agent_role: string };
+    assert.deepEqual({ ...row }, { agent_id: "wf_reviewer", agent_role: "verification" });
+  });
+
   it("seeds engine and workflow context defaults", () => {
     const defaults = buildEngineContextDefaults(WORKFLOW as never);
     assert.equal(defaults.base_branch, "develop");
@@ -128,6 +146,15 @@ describe("blocked run resume", () => {
       { status: string; fix_rounds: number };
     assert.deepEqual({ ...step }, { status: "waiting", fix_rounds: 3 });
     assert.equal((await resumeBlockedRun("run-1", {}, okDeps(200) as never)).status, "resumed");
+  });
+
+  it("restores max_tokens when registration fails after a maxTokens override", async () => {
+    seedBlockedGate();
+    getDb().prepare("UPDATE runs SET max_tokens = 1000 WHERE id = 'run-1'").run();
+    await assert.rejects(resumeBlockedRun("run-1", { maxTokens: 9000 }, okDeps(503) as never), /daemon down/);
+    const run = getDb().prepare("SELECT status, max_tokens FROM runs WHERE id = 'run-1'").get() as
+      { status: string; max_tokens: number };
+    assert.deepEqual({ ...run }, { status: "blocked", max_tokens: 1000 });
   });
 
   it("makes a blocked fix step claimable again", () => {

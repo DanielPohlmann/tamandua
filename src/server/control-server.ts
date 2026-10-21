@@ -27,6 +27,7 @@ import { logger } from "../lib/logger.js";
 import { getDb } from "../db.js";
 import { emitEvent } from "../installer/events.js";
 import { validateRunHarnessForScheduling } from "../installer/run-harness.js";
+import { clearRateLimitMarker } from "../installer/rate-limit.js";
 
 export const DEFAULT_CONTROL_PORT = 3339;
 const DEFAULT_MAX_ACTIVE_TIMERS = 50;
@@ -352,7 +353,10 @@ async function handlePauseRun(runId: string, drain = false): Promise<JsonRespons
   const run = getRun(runId);
   if (!run) return notFound(`Run not found: ${runId}`);
   if (isTerminal(run.status)) return conflict(`Run is terminal: ${run.status}`);
-  if (run.status === "paused") return ok({ state: "paused" });
+  if (run.status === "paused") {
+    try { clearRateLimitMarker(runId); } catch { /* best-effort */ }
+    return ok({ state: "paused" });
+  }
 
   if (drain) {
     try {
@@ -388,6 +392,7 @@ async function handlePauseRun(runId: string, drain = false): Promise<JsonRespons
         "UPDATE runs SET status = 'paused', scheduling_status = 'paused', updated_at = datetime('now') WHERE id = ?",
       )
       .run(runId);
+    clearRateLimitMarker(runId);
   } catch (err) {
     logger.warn("control-server: pause db update failed", { runId, error: String(err) });
   }
@@ -415,6 +420,7 @@ async function handleResumeRun(runId: string): Promise<JsonResponse> {
   if (run.status === "running" && run.scheduling_status === "active") {
     return ok({ state: "active" });
   }
+  try { clearRateLimitMarker(runId); } catch { /* best-effort */ }
   try {
     validateRunHarnessForScheduling(run.id, run.context);
   } catch (err) {
@@ -780,6 +786,8 @@ export function startReconciler(): { stop: () => void } {
   async function tick(): Promise<void> {
     if (stopped) return;
     try {
+      const { resumeDueRateLimitedRuns } = await import("../installer/rate-limit.js");
+      resumeDueRateLimitedRuns();
       const db = getDb();
       const desired = db
         .prepare(

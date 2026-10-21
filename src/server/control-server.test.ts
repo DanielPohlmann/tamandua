@@ -319,6 +319,58 @@ describe("daemon control plane", { concurrency: 1 }, () => {
     db2.close();
   });
 
+  async function insertRateLimitedRun(status: string, schedulingStatus: string): Promise<{ runId: string; read: () => Promise<{ status: string; context: Record<string, string> }> }> {
+    const dbPath = path.join(tempHome, ".tamandua", "tamandua.db");
+    const { DatabaseSync } = await import("node:sqlite");
+    const runId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const context = JSON.stringify({ working_directory_for_harness: tempHome, rate_limit_resume_at: new Date(Date.now() + 3600_000).toISOString() });
+    const db = new DatabaseSync(dbPath);
+    db.prepare(
+      "INSERT INTO runs (id, workflow_id, task, status, context, tokens_spent, scheduling_status, created_at, updated_at) VALUES (?, 'wf-rl', 'rl', ?, ?, 0, ?, ?, ?)",
+    ).run(runId, status, context, schedulingStatus, now, now);
+    db.close();
+    return {
+      runId,
+      read: async () => {
+        const reader = new DatabaseSync(dbPath);
+        const row = reader.prepare("SELECT status, context FROM runs WHERE id = ?").get(runId) as { status: string; context: string };
+        reader.prepare("DELETE FROM runs WHERE id = ?").run(runId);
+        reader.close();
+        return { status: row.status, context: JSON.parse(row.context) };
+      },
+    };
+  }
+
+  it("POST /control/pause-run on a rate-limit paused run turns it into a human pause", async (t) => {
+    if (!daemon) { t.skip("daemon not started"); return; }
+    const { runId, read } = await insertRateLimitedRun("paused", "paused");
+    const r = await jsonRequest("POST", "/control/pause-run", { runId }, secret);
+    assert.equal(r.status, 200);
+    const row = await read();
+    assert.equal(row.status, "paused");
+    assert.equal(row.context.rate_limit_resume_at, undefined);
+  });
+
+  it("POST /control/pause-run on a running run clears a stale resume marker", async (t) => {
+    if (!daemon) { t.skip("daemon not started"); return; }
+    const { runId, read } = await insertRateLimitedRun("running", "active");
+    const r = await jsonRequest("POST", "/control/pause-run", { runId }, secret);
+    assert.equal(r.status, 200);
+    const row = await read();
+    assert.equal(row.status, "paused");
+    assert.equal(row.context.rate_limit_resume_at, undefined);
+  });
+
+  it("POST /control/resume-run leaves no rate-limit resume marker", async (t) => {
+    if (!daemon) { t.skip("daemon not started"); return; }
+    const { runId, read } = await insertRateLimitedRun("paused", "paused");
+    const r = await jsonRequest("POST", "/control/resume-run", { runId }, secret);
+    assert.ok(r.status === 200 || r.status === 422, `expected 200 or 422, got ${r.status}`);
+    const row = await read();
+    assert.equal(row.context.rate_limit_resume_at, undefined);
+  });
+
   it("POST /control/resume-run emits run.resumed event", async (t) => {
     if (!daemon) {
       t.skip("daemon not started");

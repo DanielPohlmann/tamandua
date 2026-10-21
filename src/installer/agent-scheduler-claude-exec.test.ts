@@ -6,6 +6,7 @@ import os from "node:os";
 import {
   findClaudeBinary,
   runClaude,
+  buildClaudeArgs,
 } from "../../dist/installer/agent-scheduler.js";
 
 function makeMockBinary(binPath: string, behavior: string): void {
@@ -62,6 +63,24 @@ describe("findClaudeBinary", () => {
   });
 });
 
+describe("buildClaudeArgs", () => {
+  it("omits --disallowedTools when none are given", () => {
+    assert.ok(!buildClaudeArgs("P", {}).includes("--disallowedTools"));
+    assert.ok(!buildClaudeArgs("P", { disallowedTools: [] }).includes("--disallowedTools"));
+  });
+
+  it("joins disallowed tools into one comma-separated value", () => {
+    const args = buildClaudeArgs("P", { disallowedTools: ["Edit", "Write", "NotebookEdit"] });
+    assert.ok(args.join(" ").includes("--disallowedTools Edit,Write,NotebookEdit"));
+  });
+
+  it("keeps the model flag behaviour", () => {
+    assert.ok(buildClaudeArgs("P", { model: "sonnet" }).join(" ").includes("--model sonnet"));
+    assert.ok(!buildClaudeArgs("P", { model: "default" }).includes("--model"));
+    assert.deepEqual(buildClaudeArgs("P", {}), ["-p", "P", "--output-format", "json", "--dangerously-skip-permissions"]);
+  });
+});
+
 describe("runClaude", () => {
   let saved: string | undefined;
   beforeEach(() => { saved = process.env.TAMANDUA_CLAUDE_BINARY; });
@@ -103,6 +122,22 @@ describe("runClaude", () => {
     const args = fs.readFileSync(argsLog, "utf-8");
     assert.ok(args.includes("--model sonnet"), "should pass --model sonnet");
 
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("passes --disallowedTools when tools are restricted", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tam-claude-run-"));
+    const argsLog = path.join(dir, "args.log");
+    const bin = path.join(dir, "claude");
+    makeMockBinary(bin, `echo "$@" >> "${argsLog}"; printf '{"type":"result","result":"ok"}'`);
+    process.env.TAMANDUA_CLAUDE_BINARY = bin;
+
+    await runClaude("PROMPT", { timeout: 30, workdir: dir, disallowedTools: ["Edit", "Write", "NotebookEdit"] });
+    assert.ok(fs.readFileSync(argsLog, "utf-8").includes("--disallowedTools Edit,Write,NotebookEdit"));
+
+    fs.writeFileSync(argsLog, "");
+    await runClaude("PROMPT", { timeout: 30, workdir: dir, disallowedTools: [] });
+    assert.ok(!fs.readFileSync(argsLog, "utf-8").includes("--disallowedTools"));
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

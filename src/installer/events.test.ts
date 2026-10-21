@@ -366,6 +366,7 @@ describe("events", () => {
         context TEXT NOT NULL DEFAULT '{}',
         tokens_spent INTEGER NOT NULL DEFAULT 0,
         notify_url TEXT,
+        notify_format TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`);
