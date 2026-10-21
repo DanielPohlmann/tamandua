@@ -16,6 +16,7 @@ import {
   RateLimitError,
 } from "../../dist/installer/rate-limit.js";
 import { completeStep } from "../../dist/installer/step-ops.js";
+import { getRunEvents } from "../../dist/installer/events.js";
 import { executePollingRound, suspendRoundForRateLimit } from "../../dist/installer/agent-scheduler.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
@@ -201,6 +202,26 @@ describe("pause and resume", () => {
     assert.equal(run.status, "running");
     assert.equal(run.scheduling_status, "pending_register");
     assert.equal(JSON.parse(run.context).rate_limit_resume_at, undefined);
+  });
+
+  it("does not resume a run whose marker a human cleared after it was read", () => {
+    pauseRunForRateLimit("run-1", new Date(Date.now() - 1000), "rate limited");
+    const db = getDb();
+    const prepare = db.prepare.bind(db);
+    db.prepare = ((sql: string) => {
+      if (sql.includes("SET status = 'running'")) {
+        prepare("UPDATE runs SET context = '{}' WHERE id = 'run-1'").run();
+      }
+      return prepare(sql);
+    }) as typeof db.prepare;
+    try {
+      assert.deepEqual(resumeDueRateLimitedRuns(new Date()), []);
+    } finally {
+      db.prepare = prepare;
+    }
+    const run = db.prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "paused");
+    assert.equal(getRunEvents("run-1").some((e) => e.event === "run.resumed"), false);
   });
 
   it("does not resume runs paused by an operator", () => {

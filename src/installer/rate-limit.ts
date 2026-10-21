@@ -195,10 +195,12 @@ export function resumeDueRateLimitedRuns(now: Date = new Date()): string[] {
       const due = new Date(resumeAt);
       if (!Number.isNaN(due.getTime()) && due > now) continue;
       delete context[RATE_LIMIT_RESUME_KEY];
-      db.prepare(
+      const result = db.prepare(
         `UPDATE runs SET status = 'running', context = ?, scheduling_status = 'pending_register',
-                scheduling_requested_at = ?, updated_at = datetime('now') WHERE id = ? AND status = 'paused'`,
+                scheduling_requested_at = ?, updated_at = datetime('now')
+         WHERE id = ? AND status = 'paused' AND json_extract(context, '$.${RATE_LIMIT_RESUME_KEY}') IS NOT NULL`,
       ).run(JSON.stringify(context), now.toISOString(), run.id);
+      if (Number(result.changes) !== 1) continue;
       emitEvent({ ts: now.toISOString(), event: "run.resumed", runId: run.id, detail: "Usage limit reset" });
       resumed.push(run.id);
     } catch {
