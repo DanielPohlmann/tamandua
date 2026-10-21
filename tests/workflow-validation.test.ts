@@ -198,7 +198,7 @@ describe("workflow structure", () => {
       const spec = await loadWorkflowSpec(wfDir(id));
       const agentIds = new Set(spec.agents.map((a) => a.id));
       for (const step of spec.steps) {
-        assert.ok(agentIds.has(step.agent),
+        assert.ok(step.type === "bash" || agentIds.has(step.agent),
           `${id}: step "${step.id}" references unknown agent "${step.agent}"`);
       }
     }

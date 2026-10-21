@@ -24,6 +24,7 @@ You don't need to hire a dev team. You need to define one. Tamandua gives you a 
 - [How It Works](#how-it-works)
 - [Build Your Own](#build-your-own)
 - [Native AutoResearch](#native-autoresearch)
+- [Agent pipeline safety](#agent-pipeline-safety)
 - [Security](#security)
 - [Commands](#commands)
 - [Requirements](#requirements)
@@ -460,6 +461,16 @@ run as `baseline`, `keep`, `discard`, `crash`, or `checks_failed` by comparing t
 latest metric with prior accepted results. The `next` prompt carries the ratchet:
 it restates the goal, best result, last learning, and next focus before the agent
 starts another experiment.
+
+---
+
+## Agent pipeline safety
+
+- **Read-only roles.** Verification, analysis, testing and scanning agents run with `--disallowedTools Edit,Write,NotebookEdit`. After each such step the engine checks the worktree; any untracked, non-ignored file blocks the run. Offending files are quarantined (never deleted) in `<git-common-dir>/tamandua-quarantine/<run>/<step>/`.
+- **Enforcement limits.** The `pi` and `hermes` harnesses get no `--disallowedTools`, so only the after-the-fact check applies. Ignored files, `.git` internals and writes outside the worktree are not detected, and read-only roles still have Bash.
+- **Usage limits.** When a harness hits a usage limit, the run pauses and resumes instead of failing.
+- **Token budget.** A run that exhausts its token budget blocks; raise it with `tamandua workflow resume <run> --max-tokens <n>`.
+- **Notifications.** Set `TAMANDUA_NOTIFY_URL` to receive a POST when a run blocks or finishes; add `TAMANDUA_NOTIFY_FORMAT=ntfy` for ntfy-style payloads.
 
 ---
 

@@ -1,4 +1,4 @@
 # Identity
 
-Name: E2E Tester
-Role: Whole-app end-to-end testing for complete user-facing features
+Name: E2E Verifier
+Role: Read-only acceptance-criteria walk in a real browser
