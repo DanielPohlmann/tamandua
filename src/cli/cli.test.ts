@@ -50,7 +50,30 @@ describe("parseWorkflowRunArgs", () => {
       noHurrySaveTokensMode: undefined,
       noRelaunchUponRugpull: undefined,
       harnessAs: undefined,
+      context: {},
     });
+  });
+
+  it("collects repeatable --context key=value pairs (later wins) and keeps them out of the task", () => {
+    const result = parseWorkflowRunArgs([
+      "docs/spec.md",
+      "--context", "base_branch=main",
+      "--context=feature_flag=a=b",
+      "--context", "base_branch=release",
+    ]);
+    assert.equal(result.taskTitle, "docs/spec.md");
+    assert.deepEqual(result.context, { base_branch: "release", feature_flag: "a=b" });
+  });
+
+  it("defaults to an empty context", () => {
+    assert.deepEqual(parseWorkflowRunArgs(["task"]).context, {});
+  });
+
+  it("rejects malformed --context values", () => {
+    assert.throws(() => parseWorkflowRunArgs(["--context", "novalue", "task"]), /--context expects key=value/);
+    assert.throws(() => parseWorkflowRunArgs(["--context", "=x", "task"]), /--context expects key=value/);
+    assert.throws(() => parseWorkflowRunArgs(["task", "--context"]), /Missing value for --context/);
+    assert.throws(() => parseWorkflowRunArgs(["--context", "bad-key=x", "task"]), /--context key must match/);
   });
 
   it("parses --no-hurry-please-save-tokens-mode as a boolean flag", () => {

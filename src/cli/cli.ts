@@ -1049,6 +1049,9 @@ Starts a new run of the given workflow with the specified task description.
 The task is passed to the workflow's agents as their objective.
 
 Options:
+  --context <key=value>
+      Set a run context value (repeatable). Overrides the workflow's
+      context defaults, e.g. --context base_branch=main.
   --no-hurry-please-save-tokens-mode
       Run in a token-saving mode where agents poll less frequently.
       Reduces token consumption at the cost of slower progress.
@@ -1081,7 +1084,9 @@ Examples:
   tamandua workflow run feature-dev-merge "Build login page" \\
       --working-directory-for-harness /path/to/project
   tamandua workflow run feature-dev-merge "Fix bug #42" \\
-      --worktree-origin-repository /repos/myapp --worktree-origin-ref develop`;
+      --worktree-origin-repository /repos/myapp --worktree-origin-ref develop
+  tamandua workflow run superpowers-feature "docs/superpowers/specs/x-design.md" \\
+      --context base_branch=main`;
 }
 
 function getWorkflowStatusHelp(): string {
@@ -2740,6 +2745,7 @@ async function main() {
       noHurrySaveTokensMode: runArgs.noHurrySaveTokensMode,
       noRelaunchUponRugpull: runArgs.noRelaunchUponRugpull,
       harnessType,
+      context: runArgs.context,
     });
     console.log(`Run: ${result.runId.slice(0, 8)}\nWorkflow: ${result.workflowId}\nTask: ${result.taskTitle}\nStatus: ${result.status}\nHarness CWD: ${result.workingDirectoryForHarness}`);
     return;

@@ -6,6 +6,7 @@ export interface WorkflowRunArgs {
   noHurrySaveTokensMode?: boolean;
   noRelaunchUponRugpull?: boolean;
   harnessAs?: "pi" | "hermes" | "claude";
+  context: Record<string, string>;
 }
 
 export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
@@ -16,6 +17,7 @@ export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
   let noHurrySaveTokensMode: boolean | undefined;
   let noRelaunchUponRugpull: boolean | undefined;
   let harnessAs: "pi" | "hermes" | "claude" | undefined;
+  const context: Record<string, string> = {};
 
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
@@ -120,6 +122,19 @@ export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
       continue;
     }
 
+    if (token === "--context") {
+      const value = args[i + 1];
+      if (value === undefined) throw new Error("Missing value for --context.");
+      addContextPair(context, value);
+      i++;
+      continue;
+    }
+
+    if (token.startsWith("--context=")) {
+      addContextPair(context, token.slice("--context=".length));
+      continue;
+    }
+
     taskParts.push(token);
   }
 
@@ -131,5 +146,18 @@ export function parseWorkflowRunArgs(args: string[]): WorkflowRunArgs {
     noHurrySaveTokensMode,
     noRelaunchUponRugpull,
     harnessAs,
+    context,
   };
+}
+
+const CONTEXT_KEY = /^[a-z][a-z0-9_]*$/;
+
+function addContextPair(context: Record<string, string>, pair: string): void {
+  const separator = pair.indexOf("=");
+  if (separator <= 0) throw new Error(`--context expects key=value, got "${pair}".`);
+  const key = pair.slice(0, separator).trim();
+  if (!CONTEXT_KEY.test(key)) {
+    throw new Error(`--context key must match ${CONTEXT_KEY} (lowercase snake_case), got "${key}".`);
+  }
+  context[key] = pair.slice(separator + 1);
 }
