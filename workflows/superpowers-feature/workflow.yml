@@ -34,6 +34,8 @@ description: |
   deterministic gates (unit, security, review, e2e, local CI) backed by read-only
   verifier agents. Failing gates loop through a single fix step owned by the
   developer. Opens a PR against the base branch — it never merges.
+run:
+  workspace: worktree
 polling:
   model: default
   timeoutSeconds: 120

@@ -13,6 +13,10 @@ describe("superpowers-feature workflow", async () => {
   const step = (id: string) => spec.steps.find((s) => s.id === id)!;
   const role = (agentId: string) => spec.agents.find((a) => a.id === agentId)?.role;
 
+  it("runs in an isolated worktree", () => {
+    assert.equal(spec.run?.workspace, "worktree");
+  });
+
   it("runs the steps in the spec order", () => {
     assert.deepEqual(spec.steps.map((s) => s.id), [
       "load-plan", "setup", "implement", "verify",

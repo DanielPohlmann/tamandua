@@ -5,8 +5,10 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { runWorkflow } from "../../dist/installer/run.js";
+import { parseWorkflowRunArgs } from "../../dist/cli/workflow-run-args.js";
 import { getPidFile, getPortFile, stopDaemon } from "../../dist/server/daemonctl.js";
 import { reserveRandomPort } from "../../tests/helpers/test-env.ts";
 
@@ -308,6 +310,39 @@ describe("runWorkflow", () => {
         null,
         "Daemon should not be running after validation error — process leak regression",
       );
+    });
+  });
+
+  describe("superpowers-feature worktree launch", () => {
+    it("accepts the worktree origin flags and seeds the base branch", async () => {
+      const workflowId = "superpowers-feature";
+      const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "workflows", workflowId);
+      fs.cpSync(source, path.join(tempHome, ".tamandua", "workflows", workflowId), { recursive: true });
+      const originDir = path.join(tempHome, "superpowers-origin");
+      initGitRepo(originDir);
+      const args = parseWorkflowRunArgs([
+        "docs/superpowers/specs/x-design.md",
+        "--worktree-origin-repository", originDir,
+        "--worktree-origin-ref", "main",
+        "--context", "base_branch=main",
+      ]);
+
+      try {
+        await runWorkflow({ workflowId, ...args });
+      } catch (err) {
+        assert.doesNotMatch((err as Error).message, /only valid for workflows with run\.workspace: worktree/);
+      }
+
+      const { getDb } = await import("../../dist/db.js");
+      const row = getDb().prepare(
+        "SELECT context FROM runs WHERE workflow_id = ? ORDER BY created_at DESC LIMIT 1",
+      ).get(workflowId) as { context: string } | undefined;
+      assert.ok(row, "run record should exist");
+      const ctx = JSON.parse(row.context);
+      assert.equal(ctx.workspace_mode, "worktree");
+      assert.equal(ctx.worktree_origin_ref, "main");
+      assert.equal(ctx.base_branch, "main");
+      assert.notEqual(path.resolve(ctx.repo), path.resolve(originDir), "the run must not operate on the origin checkout");
     });
   });
 
