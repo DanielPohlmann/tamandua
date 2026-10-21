@@ -44,8 +44,8 @@ Consult the skills your project's `CLAUDE.md` defines before resolving/ordering
 
 Your output is parsed by an automated scheduler. It looks for **exact markers**:
 
-- **On success:** the **last line** MUST be exactly `STATUS: done`.
-- **On failure:** end with `STATUS: failed` and a `REASON:` line.
+- **On success:** the **first line** of what you pipe to `step complete` MUST be exactly `STATUS: done`.
+- **On failure:** start with `STATUS: failed` and add a `REASON:` line.
 
 If neither marker is present, the step is treated as lost/abandoned and retried.
 

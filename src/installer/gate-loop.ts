@@ -269,6 +269,30 @@ export function completeFixStep(
   return { status: "advanced" };
 }
 
+function assertPositiveInteger(name: string, value: number | undefined): void {
+  if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+}
+
+export function applyBudgetOverrides(runId: string, overrides: BudgetOverrides): void {
+  assertPositiveInteger("maxRounds", overrides.maxRounds);
+  assertPositiveInteger("maxFixRounds", overrides.maxFixRounds);
+  assertPositiveInteger("maxTokens", overrides.maxTokens);
+  const db = getDb();
+  inTransaction(() => {
+    if (overrides.maxRounds !== undefined) {
+      db.prepare("UPDATE runs SET max_rounds_override = ? WHERE id = ?").run(overrides.maxRounds, runId);
+    }
+    if (overrides.maxFixRounds !== undefined) {
+      db.prepare("UPDATE runs SET max_fix_rounds = ? WHERE id = ?").run(overrides.maxFixRounds, runId);
+    }
+    if (overrides.maxTokens !== undefined) {
+      db.prepare("UPDATE runs SET max_tokens = ? WHERE id = ?").run(overrides.maxTokens, runId);
+    }
+  });
+}
+
 export function prepareBlockedRunResume(
   runId: string,
   overrides: BudgetOverrides = {},
@@ -285,15 +309,7 @@ export function prepareBlockedRunResume(
     const requeued = db.prepare("UPDATE steps SET status = 'pending', fix_rounds = 0, updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
       .run(runId, stepId);
     if (Number(requeued.changes) === 0) throw new Error(`Run ${runId} has no step "${stepId}" to resume`);
-    if (overrides.maxRounds !== undefined) {
-      db.prepare("UPDATE runs SET max_rounds_override = ? WHERE id = ?").run(overrides.maxRounds, runId);
-    }
-    if (overrides.maxFixRounds !== undefined) {
-      db.prepare("UPDATE runs SET max_fix_rounds = ? WHERE id = ?").run(overrides.maxFixRounds, runId);
-    }
-    if (overrides.maxTokens !== undefined) {
-      db.prepare("UPDATE runs SET max_tokens = ? WHERE id = ?").run(overrides.maxTokens, runId);
-    }
+    applyBudgetOverrides(runId, overrides);
     delete context.blocked_step;
     delete context.blocked_reason;
     db.prepare(

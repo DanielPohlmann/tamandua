@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { getDb } from "../db.js";
 import { logger } from "../lib/logger.js";
-import { claimStep, completeBashStep, recoverOrphanedStepsForAgent, resolveStepContext } from "./step-ops.js";
+import { claimStep, completeBashStep, parseDeclaredContextKeys, recoverOrphanedStepsForAgent, resolveStepContext } from "./step-ops.js";
 import { BASH_ENV_KEYS_CONTEXT_KEY, BASH_RUNNER_AGENT_ID, type WorkflowAgent, type WorkflowSpec } from "./types.js";
 
 export const BASH_RUNNER_TIMEOUT_SECONDS = 3600;
@@ -44,24 +44,13 @@ function isExcludedFromEnv(key: string, value: string): boolean {
   );
 }
 
-function workflowDeclaredEnvKeys(context: Record<string, string>): string[] {
-  const raw = context[BASH_ENV_KEYS_CONTEXT_KEY];
-  if (!raw) return [];
-  try {
-    const keys: unknown = JSON.parse(raw);
-    return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Agents write arbitrary KEY: value lines into the run context, so only the
  * keys the workflow declared plus the engine's own keys reach a gate's env.
  */
 export function buildBashEnv(context: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
-  const allowed = new Set([...ENGINE_ENV_KEYS, ...workflowDeclaredEnvKeys(context)]);
+  const allowed = new Set([...ENGINE_ENV_KEYS, ...parseDeclaredContextKeys(context)]);
   allowed.delete(BASH_ENV_KEYS_CONTEXT_KEY);
   for (const key of allowed) {
     if (!Object.hasOwn(context, key)) continue;

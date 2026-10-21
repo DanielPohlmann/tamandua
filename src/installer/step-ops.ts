@@ -91,6 +91,46 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "blocked_reason",
 ]);
 
+/** Gate-loop state the engine seeds and rewrites itself (see buildEngineContextDefaults). */
+const GATE_LOOP_CONTEXT_KEYS = new Set(["fix_feedback", "fix_origin", "minor_findings"]);
+
+/** Keys a caller must not seed through `--context`: the engine sets or rewrites them during the run. */
+export function isEngineOwnedContextKey(key: string): boolean {
+  return RESERVED_CONTEXT_KEYS.has(key)
+    || GATE_LOOP_CONTEXT_KEYS.has(key)
+    || key.startsWith("findings_")
+    || key.endsWith("_output");
+}
+
+/** Gate env inputs the plan step sets once; later step output cannot rewrite them. */
+const WRITE_ONCE_CONTEXT_KEYS = new Set(["branch", "feature_complete"]);
+/** Declared context keys a step legitimately updates (the review verifier records what it reviewed). */
+const STEP_UPDATABLE_DECLARED_KEYS = new Set(["reviewed_sha"]);
+
+/** Keys the workflow declared under `context:`, as persisted for the bash-gate env allowlist. */
+export function parseDeclaredContextKeys(context: Record<string, string>): string[] {
+  const raw = context[BASH_ENV_KEYS_CONTEXT_KEY];
+  if (!raw) return [];
+  try {
+    const keys: unknown = JSON.parse(raw);
+    return Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bash gates read their env from the run context, so step output must not be
+ * able to rewrite the inputs they trust: engine-reserved keys, base_branch and
+ * workflow-declared keys are fixed, and branch/feature_complete are first-writer-wins.
+ */
+function isProtectedFromStepOutput(key: string, context: Record<string, string>): boolean {
+  if (RESERVED_CONTEXT_KEYS.has(key)) return true;
+  if (WRITE_ONCE_CONTEXT_KEYS.has(key)) return (context[key] ?? "") !== "";
+  if (STEP_UPDATABLE_DECLARED_KEYS.has(key)) return false;
+  return key === "base_branch" || parseDeclaredContextKeys(context).includes(key);
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Template Resolution
 // ══════════════════════════════════════════════════════════════════════
@@ -790,16 +830,29 @@ export function recoverOrphanedStepsForAgent(
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * Compute whether a branch has frontend changes relative to main.
+ * Compute whether a branch has frontend changes relative to its base branch.
  * Returns 'true' or 'false' as a string for template context.
  */
-export function computeHasFrontendChanges(repo: string, branch: string): string {
+export function computeHasFrontendChanges(repo: string, branch: string, baseBranch = "main"): string {
+  const git = (args: string[]) => execFileSync("git", args, {
+    cwd: repo,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 10_000,
+  });
+  const refExists = (ref: string) => {
+    try {
+      git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   try {
-    const output = execFileSync("git", ["diff", "--name-only", `main..${branch}`], {
-      cwd: repo,
-      encoding: "utf-8",
-      timeout: 10_000,
-    });
+    // A worktree often has only the remote-tracking ref of the base branch.
+    const base = refExists(baseBranch) ? baseBranch : `origin/${baseBranch}`;
+    // Three dots: only what the branch changed since it forked, not what landed on the base since.
+    const output = git(["diff", "--name-only", `${base}...${branch}`]);
     const files = output.trim().split("\n").filter((f) => f.length > 0);
     return isFrontendChange(files) ? "true" : "false";
   } catch {
@@ -973,7 +1026,7 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
 
   // Compute has_frontend_changes from git diff when repo and branch are available
   if (context["repo"] && context["branch"]) {
-    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"]);
+    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"], context["base_branch"] || undefined);
   } else {
     context["has_frontend_changes"] = "false";
   }
@@ -1342,7 +1395,7 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const isGate = parseFixPolicy(step.on_fail) !== null && step.type === "single";
   const parsed = parseOutputKeyValues(output);
   for (const [key, value] of Object.entries(parsed)) {
-    if (RESERVED_CONTEXT_KEYS.has(key)) continue;
+    if (isProtectedFromStepOutput(key, context)) continue;
     if (isGate && key === "findings_json") continue;
     context[key] = value;
   }
@@ -2047,7 +2100,7 @@ export function resolveStepContext(
     if (prev.output) {
       const parsed = parseOutputKeyValues(prev.output);
       for (const [key, value] of Object.entries(parsed)) {
-        if (!RESERVED_CONTEXT_KEYS.has(key)) {
+        if (!isProtectedFromStepOutput(key, context)) {
           context[key] = value;
         }
       }
@@ -2056,7 +2109,7 @@ export function resolveStepContext(
 
   // Add branch info and PR detection context (extracted from previous step outputs)
   if (context["repo"] && context["branch"]) {
-    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"]);
+    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"], context["base_branch"] || undefined);
   }
 
   // Add PR info if available from context

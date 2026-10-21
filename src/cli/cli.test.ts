@@ -50,7 +50,42 @@ describe("parseWorkflowRunArgs", () => {
       noHurrySaveTokensMode: undefined,
       noRelaunchUponRugpull: undefined,
       harnessAs: undefined,
+      context: {},
     });
+  });
+
+  it("collects repeatable --context key=value pairs (later wins) and keeps them out of the task", () => {
+    const result = parseWorkflowRunArgs([
+      "docs/spec.md",
+      "--context", "base_branch=main",
+      "--context=feature_flag=a=b",
+      "--context", "base_branch=release",
+    ]);
+    assert.equal(result.taskTitle, "docs/spec.md");
+    assert.deepEqual(result.context, { base_branch: "release", feature_flag: "a=b" });
+  });
+
+  it("defaults to an empty context", () => {
+    assert.deepEqual(parseWorkflowRunArgs(["task"]).context, {});
+  });
+
+  it("rejects malformed --context values", () => {
+    assert.throws(() => parseWorkflowRunArgs(["--context", "novalue", "task"]), /--context expects key=value/);
+    assert.throws(() => parseWorkflowRunArgs(["--context", "=x", "task"]), /--context expects key=value/);
+    assert.throws(() => parseWorkflowRunArgs(["task", "--context"]), /Missing value for --context/);
+    assert.throws(() => parseWorkflowRunArgs(["--context", "bad-key=x", "task"]), /--context key must match/);
+  });
+
+  it("rejects --context keys the engine owns", () => {
+    for (const key of [
+      "task", "repo", "run_id", "workspace_mode", "worktree_origin_ref", "fix_feedback", "fix_origin",
+      "findings_gate_review", "minor_findings", "gate_unit_output", "blocked_step", "blocked_reason",
+      "rate_limit_resume_at", "rate_limit_pauses", "__env_keys",
+    ]) {
+      assert.throws(() => parseWorkflowRunArgs(["--context", `${key}=x`, "task"]), /--context/, key);
+    }
+    assert.throws(() => parseWorkflowRunArgs(["--context", "fix_feedback=x", "task"]), /"fix_feedback" is owned by the engine/);
+    assert.deepEqual(parseWorkflowRunArgs(["--context", "reviewed_sha=abc", "task"]).context, { reviewed_sha: "abc" });
   });
 
   it("parses --no-hurry-please-save-tokens-mode as a boolean flag", () => {
@@ -1468,6 +1503,7 @@ describe("--help infrastructure", () => {
       assert.match(result.stdout ?? "", /Resume a paused or failed workflow/);
       assert.match(result.stdout ?? "", /paused.*Connects to the dashboard daemon/);
       assert.match(result.stdout ?? "", /failed.*Restarts the run/);
+      assert.match(result.stdout ?? "", /same run id/);
       assert.match(result.stdout ?? "", /completed.*cannot be resumed/);
       assert.doesNotMatch(result.stdout ?? "", /tamandua get-ready/);
     } finally {

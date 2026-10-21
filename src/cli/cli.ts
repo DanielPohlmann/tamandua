@@ -11,7 +11,10 @@ try {
 import { installWorkflow } from "../installer/install.js";
 import { uninstallAllWorkflows, uninstallWorkflow, checkActiveRuns } from "../installer/uninstall.js";
 import { getWorkflowStatus, listRuns, stopWorkflow, deleteWorkflow, type RunInfo, type RunDetail } from "../installer/status.js";
-import { runWorkflow, resumeWorkflow, type RunWorkflowResult } from "../installer/run.js";
+import { runWorkflow, resumeWorkflow, resumeBlockedRun, type RunWorkflowResult } from "../installer/run.js";
+import { listFindings } from "../installer/findings.js";
+import { applyBudgetOverrides } from "../installer/gate-loop.js";
+import { buildRunStatusJson, describeBlockedResume, formatFindingsText, hasOverrides, loadRunContext, parseFindingsArgs, parseResumeOverrides } from "./run-inspection.js";
 import { listBundledWorkflows, getWorkflowShortDescription } from "../installer/workflow-fetch.js";
 import { loadWorkflowSpec } from "../installer/workflow-spec.js";
 import { resolveBundledWorkflowDir } from "../installer/paths.js";
@@ -1049,6 +1052,9 @@ Starts a new run of the given workflow with the specified task description.
 The task is passed to the workflow's agents as their objective.
 
 Options:
+  --context <key=value>
+      Set a run context value (repeatable). Overrides the workflow's
+      context defaults, e.g. --context base_branch=main.
   --no-hurry-please-save-tokens-mode
       Run in a token-saving mode where agents poll less frequently.
       Reduces token consumption at the cost of slower progress.
@@ -1081,19 +1087,43 @@ Examples:
   tamandua workflow run feature-dev-merge "Build login page" \\
       --working-directory-for-harness /path/to/project
   tamandua workflow run feature-dev-merge "Fix bug #42" \\
-      --worktree-origin-repository /repos/myapp --worktree-origin-ref develop`;
+      --worktree-origin-repository /repos/myapp --worktree-origin-ref develop
+  tamandua workflow run superpowers-feature "docs/superpowers/specs/x-design.md" \\
+      --context base_branch=main`;
+}
+
+function getWorkflowFindingsHelp(): string {
+  return `tamandua workflow findings — List gate findings recorded for a run
+
+Usage: tamandua workflow findings <query> [--json] [--status <status>] [--gate <step-id>]
+
+Lists the findings gates raised for a run, with their fix-loop status.
+
+Options:
+  --json               Print a JSON array of findings
+  --status <status>    Only open, resolved, disputed or repeated findings
+  --gate <step-id>     Only findings raised by this gate step
+
+Examples:
+  tamandua workflow findings abc12345 --status open
+  tamandua workflow findings abc12345 --json --gate gate-review`;
 }
 
 function getWorkflowStatusHelp(): string {
   return `tamandua workflow status — Show detailed run status with step listing
 
-Usage: tamandua workflow status <query>
+Usage: tamandua workflow status <query> [--json]
 
 Shows detailed information about a workflow run, including status, token
 usage, workspace mode (for worktree runs), and a list of every step with
 its current status and assigned agent role.
 
 The query accepts a run-id prefix for matching.
+
+Options:
+  --json    Print {"id","status","currentStepId","blockedStep","blockedReason",
+            "pausedUntil","tokensSpent","context":{"pr"?}} for programmatic
+            polling (pausedUntil is the rate-limit resume time, or null)
 
 Output includes:
   Run          Run ID (8-char prefix)
@@ -1183,21 +1213,30 @@ Examples:
 }
 
 function getWorkflowResumeHelp(): string {
-  return `tamandua workflow resume — Resume a paused or failed workflow run
+  return `tamandua workflow resume — Resume a paused, blocked or failed workflow run
 
-Usage: tamandua workflow resume <run-id>
+Usage: tamandua workflow resume <run-id> [--max-rounds <n>] [--max-fix-rounds <n>] [--max-tokens <n>]
 
-Resumes a workflow run that is paused or has failed. The run-id accepts
+Resumes a workflow run that is paused, blocked or has failed. The run-id accepts
 prefix matching.
 
 Behavior by status:
   paused    Connects to the dashboard daemon and resumes agent polling.
             The daemon must be running for this to work.
-  failed    Restarts the run from the failed step, creating a new run
-            entry. The daemon is notified of the new run automatically.
+  failed    Restarts the run under the same run id: the first failed step
+            and every step after it are re-queued. The daemon is notified
+            automatically.
+  blocked   Re-queues the step that blocked the run (gate, fix or pr) on the
+            current worktree HEAD, resets that step's fix-round counter and
+            keeps the findings history.
   Other     Terminal runs (completed, canceled) cannot be resumed.
             Runs with status "running" are already active and do not
             need to be resumed.
+
+Budget overrides (any status except terminal):
+  --max-rounds <n>       Fix rounds each gate may send
+  --max-fix-rounds <n>   Fix rounds across all gates of the run
+  --max-tokens <n>       Token budget for the run
 
 Examples:
   tamandua workflow resume abc12345       # Resume a paused run
@@ -1241,7 +1280,7 @@ Examples:
 function getWorkflowGroupHelp(): string {
   return `tamandua workflow — Manage workflows and runs
 
-Usage: tamandua workflow <list|runs|install|uninstall|run|status|autoresearch|stop|delete|pause|resume|pause-all|resume-all>
+Usage: tamandua workflow <list|runs|install|uninstall|run|status|findings|autoresearch|stop|delete|pause|resume|pause-all|resume-all>
 
 Commands for managing Tamandua workflows and their runs.
 
@@ -1253,6 +1292,7 @@ Subcommands:
               active-runs check)
   run         Start a new workflow run with the given task
   status      Show detailed run status with step listing
+  findings    List gate findings recorded for a run (--json, --status, --gate)
   autoresearch
               Show AutoResearch progress for a run
   stop        Cancel a running workflow
@@ -1703,6 +1743,7 @@ async function main() {
       if (action === "uninstall") { printHelp(getWorkflowUninstallHelp()); }
       if (action === "run") { printHelp(getWorkflowRunHelp()); }
       if (action === "status") { printHelp(getWorkflowStatusHelp()); }
+      if (action === "findings") { printHelp(getWorkflowFindingsHelp()); }
       if (action === "autoresearch") { printHelp(getWorkflowAutoresearchHelp()); }
       if (action === "delete") { printHelp(getWorkflowDeleteHelp()); }
       if (action === "stop") { printHelp(getWorkflowStopHelp()); }
@@ -2613,6 +2654,31 @@ async function main() {
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
       process.exit(1);
     }
+    let overrides: ReturnType<typeof parseResumeOverrides>;
+    try {
+      overrides = parseResumeOverrides(args.slice(3));
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
+    if (runStatus === "blocked") {
+      let result: Awaited<ReturnType<typeof resumeBlockedRun>>;
+      try {
+        result = await resumeBlockedRun(fullId, overrides);
+      } catch (err) {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+        process.exit(1);
+      }
+      const report = describeBlockedResume(result, target);
+      if (!report.ok) { process.stderr.write(`${report.message}\n`); process.exit(1); }
+      console.log(report.message);
+      return;
+    }
+    if (hasOverrides(overrides) && runStatus !== "completed" && runStatus !== "canceled") {
+      applyBudgetOverrides(fullId, overrides);
+      console.log(`Updated budgets for run ${fullId.slice(0, 8)}.`);
+      if (runStatus === "running") return;
+    }
     if (runStatus === "paused") {
       const response = await resumeRunWithDaemon(fullId);
       if (response === null) {
@@ -2637,7 +2703,7 @@ async function main() {
       process.stderr.write(`Cannot resume run ${fullId.slice(0, 8)}: status is "${runStatus}" (terminal runs cannot be resumed).\n`);
       process.exit(1);
     }
-    process.stderr.write(`Cannot resume run ${fullId.slice(0, 8)}: status is "${runStatus}" (only paused or failed runs can be resumed).\n`);
+    process.stderr.write(`Cannot resume run ${fullId.slice(0, 8)}: status is "${runStatus}" (only paused, blocked or failed runs can be resumed).\n`);
     process.exit(1);
   }
 
@@ -2740,6 +2806,7 @@ async function main() {
       noHurrySaveTokensMode: runArgs.noHurrySaveTokensMode,
       noRelaunchUponRugpull: runArgs.noRelaunchUponRugpull,
       harnessType,
+      context: runArgs.context,
     });
     console.log(`Run: ${result.runId.slice(0, 8)}\nWorkflow: ${result.workflowId}\nTask: ${result.taskTitle}\nStatus: ${result.status}\nHarness CWD: ${result.workingDirectoryForHarness}`);
     return;
@@ -2749,6 +2816,10 @@ async function main() {
     if (!target) { process.stderr.write("Missing query.\n"); process.exit(1); }
     try {
       const result = getWorkflowStatus(target);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(buildRunStatusJson(result, loadRunContext(result.id))));
+        return;
+      }
       console.log(`Run: ${result.id.slice(0, 8)}\nWorkflow: ${result.workflowId}\nTask: ${result.task}\nStatus: ${result.status}\nTokens: ${result.tokensSpent.toLocaleString()}`);
       if (result.workspace_mode === "worktree") {
         console.log(`Workspace: ${result.workspace_mode}`);
@@ -2762,7 +2833,26 @@ async function main() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : `No run found matching "${target}".`;
+      if (args.includes("--json")) {
+        process.stderr.write(`${message}
+`);
+        process.exit(1);
+      }
       console.log(message.startsWith("No run found matching") ? `No run found matching "${target}".` : message);
+    }
+    return;
+  }
+
+  if (action === "findings") {
+    if (!target) { process.stderr.write("Missing query.\n"); process.exit(1); }
+    try {
+      const options = parseFindingsArgs(args.slice(3));
+      const runId = getWorkflowStatus(target).id;
+      const findings = listFindings(runId, { status: options.status, gate: options.gate });
+      console.log(options.json ? JSON.stringify(findings) : formatFindingsText(findings));
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
     }
     return;
   }
