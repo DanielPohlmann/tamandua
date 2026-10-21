@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { getDb, closeDb } from "../../dist/db.js";
 import { claimStep, completeStep, completeBashStep, advancePipeline } from "../../dist/installer/step-ops.js";
+import { getRunEvents } from "../../dist/installer/events.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
 const GATE_EXPECTS = "regex:^STATUS: (done|retry|blocked)$";
@@ -251,5 +252,30 @@ describe("gate loop with the fix step in the middle of the pipeline", () => {
     completeStep(fixClaim.stepId!, "STATUS: done\nRESOLVED: []");
     assert.equal(status("gate-unit"), "pending");
     assert.equal(status("fix"), "waiting");
+  });
+});
+
+describe("pr opened event", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-pr-opened-");
+    seedRun(getDb(), { id: "run-1" }, [
+      { id: "s-pr", stepId: "pr", index: 0, status: "running" },
+      { id: "s-pr2", stepId: "pr-again", index: 1, status: "running" },
+    ]);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("emits run.pr_opened when a step reports a new PR url", () => {
+    completeStep("s-pr", "STATUS: done\nPR: https://github.com/o/r/pull/12");
+    const events = getRunEvents("run-1").filter((e) => e.event === "run.pr_opened");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].detail, "https://github.com/o/r/pull/12");
+  });
+
+  it("does not emit again when the same PR url is reported twice", () => {
+    completeStep("s-pr", "STATUS: done\nPR: https://github.com/o/r/pull/12");
+    completeStep("s-pr2", "STATUS: done\nPR: https://github.com/o/r/pull/12");
+    assert.equal(getRunEvents("run-1").filter((e) => e.event === "run.pr_opened").length, 1);
   });
 });

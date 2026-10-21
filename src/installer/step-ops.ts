@@ -24,6 +24,7 @@ import {
   tailLines,
 } from "./gate-loop.js";
 import { parseFindingsJson } from "./findings.js";
+import { detectOpenedPr } from "./notifications.js";
 import { enforceReadOnly, recordReadOnlyBaseline } from "./read-only.js";
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1317,6 +1318,7 @@ export function completeStep(stepId: string, output: string): { status: string; 
   // Merge KEY: value lines into run context
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string };
   const context: Record<string, string> = JSON.parse(run.context);
+  const previousPr = context["pr"];
 
   const isGate = parseFixPolicy(step.on_fail) !== null && step.type === "single";
   const parsed = parseOutputKeyValues(output);
@@ -1329,6 +1331,11 @@ export function completeStep(stepId: string, output: string): { status: string; 
   db.prepare(
     "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
   ).run(JSON.stringify(context), runId);
+
+  const openedPr = detectOpenedPr(previousPr, context["pr"]);
+  if (openedPr) {
+    emitEvent({ ts: new Date().toISOString(), event: "run.pr_opened", runId, workflowId: getWorkflowId(runId), stepId: step.step_id, detail: openedPr });
+  }
 
   // Parse STORIES_JSON from output (any step, typically the planner)
   parseAndInsertStories(output, runId);

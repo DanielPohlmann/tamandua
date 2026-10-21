@@ -25,12 +25,14 @@ import {
   serializeFixPolicy,
   type BudgetOverrides,
 } from "./gate-loop.js";
+import { resolveNotifyTarget, type NotifyFormat } from "./notifications.js";
 import { BASH_ENV_KEYS_CONTEXT_KEY, type HarnessType, type WorkflowSpec } from "./types.js";
 
 export interface RunWorkflowParams {
   workflowId: string;
   taskTitle: string;
   notifyUrl?: string;
+  notifyFormat?: NotifyFormat;
   /** Optional initial context for template resolution */
   context?: Record<string, string>;
   /** Working directory for the pi harness/tool execution environment */
@@ -297,16 +299,17 @@ export async function runWorkflow(
   }
 
   const contextJson = JSON.stringify(seededContext);
+  const notifyTarget = resolveNotifyTarget({ explicitUrl: notifyUrl, explicitFormat: params.notifyFormat, workflow });
 
   // Insert the run record. New runs start with
   // scheduling_status='pending_register' so the daemon control plane
   // (and/or reconciler) can admit them.
   db.prepare(
     `INSERT INTO runs (id, run_number, workflow_id, task, status, context, tokens_spent,
-                       scheduling_status, scheduling_requested_at, notify_url, max_fix_rounds, max_tokens,
+                       scheduling_status, scheduling_requested_at, notify_url, notify_format, max_fix_rounds, max_tokens,
                        created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?, ?)`,
-  ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyUrl ?? null,
+     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyTarget.url, notifyTarget.format,
     workflow.budgets?.max_fix_rounds ?? DEFAULT_MAX_FIX_ROUNDS, workflow.budgets?.max_tokens ?? null, now, now);
 
   insertRunSteps(workflow, runId, now);
