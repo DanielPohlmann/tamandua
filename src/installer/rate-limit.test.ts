@@ -10,7 +10,11 @@ import {
   pauseRunForRateLimit,
   resumeDueRateLimitedRuns,
   suspendRunForRateLimit,
+  rateLimitFromFailedRun,
+  resetRateLimitPauses,
+  MAX_CONSECUTIVE_RATE_LIMIT_PAUSES,
 } from "../../dist/installer/rate-limit.js";
+import { completeStep } from "../../dist/installer/step-ops.js";
 import { executePollingRound } from "../../dist/installer/agent-scheduler.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
@@ -19,19 +23,19 @@ describe("parseRateLimitWait", () => {
 
   it("waits until the next h:mm AM/PM reset", () => {
     assert.equal(parseRateLimitWait("5-hour limit reached ∙ reset at 3:30 PM", now), 90 * 60_000);
-    assert.equal(parseRateLimitWait("reset at 1:00 PM", now), 23 * 60 * 60_000);
-    assert.equal(parseRateLimitWait("reset at 12:00 AM", now), 10 * 60 * 60_000);
+    assert.equal(parseRateLimitWait("limit reached, reset at 1:00 PM", now), 23 * 60 * 60_000);
+    assert.equal(parseRateLimitWait("limit reached, reset at 12:00 AM", now), 10 * 60 * 60_000);
   });
 
   it("handles minute based messages with a 60s floor", () => {
-    assert.equal(parseRateLimitWait("Please wait 7 minutes", now), 7 * 60_000);
-    assert.equal(parseRateLimitWait("try again in 0", now), 60_000);
+    assert.equal(parseRateLimitWait("Rate limit hit. Please wait 7 minutes", now), 7 * 60_000);
+    assert.equal(parseRateLimitWait("Usage limit: try again in 0", now), 60_000);
   });
 
   it("accepts reset phrasing without minutes and ignores a trailing timezone", () => {
     assert.equal(parseRateLimitWait("You've hit your limit · resets 3pm (America/Sao_Paulo)", now), 60 * 60_000);
     assert.equal(parseRateLimitWait("limit reached, resets at 2:30 PM", now), 30 * 60_000);
-    assert.equal(parseRateLimitWait("resets 2pm", now), 24 * 60 * 60_000);
+    assert.equal(parseRateLimitWait("limit reached · resets 2pm", now), 24 * 60 * 60_000);
   });
 
   it("accepts the epoch seconds suffix form", () => {
@@ -41,13 +45,27 @@ describe("parseRateLimitWait", () => {
   });
 
   it("honours hour and second units", () => {
-    assert.equal(parseRateLimitWait("try again in 2 hours", now), 2 * 3600_000);
-    assert.equal(parseRateLimitWait("try again in 90 seconds", now), 90_000);
-    assert.equal(parseRateLimitWait("try again in 10 seconds", now), 60_000);
+    assert.equal(parseRateLimitWait("Usage limit reached, try again in 2 hours", now), 2 * 3600_000);
+    assert.equal(parseRateLimitWait("Usage limit reached, try again in 90 seconds", now), 90_000);
+    assert.equal(parseRateLimitWait("Usage limit reached, try again in 10 seconds", now), 60_000);
   });
 
   it("returns null for unrelated text", () => {
     assert.equal(parseRateLimitWait("all tests passed", now), null);
+  });
+
+  it("ignores time patterns unless the same text mentions a limit", () => {
+    assert.equal(parseRateLimitWait("Flaky test, try again in 5 minutes", now), null);
+    assert.equal(parseRateLimitWait("server resets at 3:30 PM", now), null);
+    assert.equal(parseRateLimitWait("build id|1761062400", now), null);
+  });
+
+  it("reads a failed run's stderr and only an is_error JSON result from stdout", () => {
+    assert.equal(rateLimitFromFailedRun("", "I will try again in 5 minutes", now), null);
+    assert.equal(rateLimitFromFailedRun("", '{"is_error":false,"result":"usage limit, try again in 5 minutes"}', now), null);
+    assert.equal(rateLimitFromFailedRun("Error: usage limit reached · resets 3pm", "", now), 60 * 60_000);
+    assert.equal(rateLimitFromFailedRun("", '{"is_error":true,"result":"Usage limit reached, try again in 5"}', now), 5 * 60_000);
+    assert.equal(rateLimitFromFailedRun("checkout failed at |1761062400", "", now), null);
   });
 
   it("reads only error results of claude JSON output", () => {
@@ -111,6 +129,40 @@ describe("pause and resume", () => {
     const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
     assert.equal(step.status, "pending");
     assert.equal(run.status, "paused");
+  });
+
+  const reclaim = () => getDb().prepare("UPDATE steps SET status = 'running' WHERE id = 's-review'").run();
+
+  it("falls back to the normal failure path on the 6th consecutive pause of a step", () => {
+    for (let i = 1; i <= MAX_CONSECUTIVE_RATE_LIMIT_PAUSES; i++) {
+      assert.equal(suspendRunForRateLimit("run-1", "wf_reviewer", "job-1", new Date(Date.now() - 1000), "rate limited"), 1, `pause ${i}`);
+      resumeDueRateLimitedRuns(new Date());
+      reclaim();
+    }
+    assert.equal(suspendRunForRateLimit("run-1", "wf_reviewer", "job-1", new Date(Date.now() + 60_000), "rate limited"), null);
+    const step = getDb().prepare("SELECT status FROM steps WHERE id = 's-review'").get() as { status: string };
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(step.status, "running");
+    assert.equal(run.status, "running");
+  });
+
+  it("restarts the pause count once the step completes or fails normally", () => {
+    for (let i = 1; i <= MAX_CONSECUTIVE_RATE_LIMIT_PAUSES; i++) {
+      suspendRunForRateLimit("run-1", "wf_reviewer", "job-1", new Date(Date.now() - 1000), "rate limited");
+      resumeDueRateLimitedRuns(new Date());
+      reclaim();
+    }
+    resetRateLimitPauses("run-1", "gate-review");
+    assert.equal(suspendRunForRateLimit("run-1", "wf_reviewer", "job-1", new Date(Date.now() + 60_000), "rate limited"), 1);
+  });
+
+  it("resets the pause count when completeStep accepts the step", () => {
+    suspendRunForRateLimit("run-1", "wf_reviewer", "job-1", new Date(Date.now() - 1000), "rate limited");
+    resumeDueRateLimitedRuns(new Date());
+    reclaim();
+    completeStep("s-review", "STATUS: done");
+    const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
+    assert.equal(JSON.parse(context.rate_limit_pauses ?? "{}")["gate-review"], undefined);
   });
 
   it("skips a malformed row without aborting the others", () => {

@@ -7,8 +7,11 @@ const WAIT_PATTERNS: Array<{ pattern: RegExp; defaultUnit?: string }> = [
   { pattern: /wait\s+(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b/i },
   { pattern: /try again in\s+(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)?\b/i, defaultUnit: "minutes" },
 ];
+const LIMIT_KEYWORD = /limit/i;
 const MIN_WAIT_MS = 60_000;
 export const RATE_LIMIT_RESUME_KEY = "rate_limit_resume_at";
+export const RATE_LIMIT_PAUSES_KEY = "rate_limit_pauses";
+export const MAX_CONSECUTIVE_RATE_LIMIT_PAUSES = 5;
 
 export class RateLimitError extends Error {
   constructor(readonly waitMs: number, message: string) {
@@ -24,7 +27,9 @@ function unitMs(unit: string): number {
   return 60_000;
 }
 
+/** Reads a usage-limit wait from `text`; a time pattern only counts when the same text mentions a limit. */
 export function parseRateLimitWait(text: string, now: Date = new Date()): number | null {
+  if (!LIMIT_KEYWORD.test(text)) return null;
   const resetMatch = text.match(RESET_AT);
   if (resetMatch) {
     const meridiem = resetMatch[3].toUpperCase();
@@ -54,6 +59,11 @@ export function rateLimitFromClaudeResult(rawStdout: string, now: Date = new Dat
   } catch {
     return null;
   }
+}
+
+/** A failed run is rate limited only by its stderr or by an `is_error` JSON result, never by prose in stdout. */
+export function rateLimitFromFailedRun(stderr: string, stdout: string, now: Date = new Date()): number | null {
+  return parseRateLimitWait(stderr, now) ?? rateLimitFromClaudeResult(stdout.trim(), now);
 }
 
 function readContext(raw: unknown): Record<string, string> {
@@ -106,9 +116,59 @@ export function pauseRunForRateLimit(runId: string, resumeAt: Date, detail: stri
   emitEvent({ ts: new Date().toISOString(), event: "run.paused", runId, detail: `${detail}; resuming at ${effective.toISOString()}` });
 }
 
-/** Re-queues the claimed steps and pauses the run atomically. */
-export function suspendRunForRateLimit(runId: string, agentId: string, jobId: string, resumeAt: Date, detail: string): number {
+function readPauseCounts(context: Record<string, string>): Record<string, number> {
+  try {
+    const parsed = JSON.parse(context[RATE_LIMIT_PAUSES_KEY] ?? "{}") as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function updateRunContext(runId: string, update: (context: Record<string, string>) => boolean): void {
+  const db = getDb();
+  const row = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string } | undefined;
+  if (!row) return;
+  const context = readContext(row.context);
+  if (update(context)) db.prepare("UPDATE runs SET context = ? WHERE id = ?").run(JSON.stringify(context), runId);
+}
+
+/** Counts one more rate-limit pause for each claimed step; false (and nothing counted) once a step reached the cap. */
+function countRateLimitPauses(runId: string, agentId: string, jobId: string): boolean {
+  const steps = getDb().prepare(
+    `SELECT step_id FROM steps
+     WHERE run_id = ? AND agent_id = ? AND status = 'running' AND (claim_job_id IS NULL OR claim_job_id = ?)`,
+  ).all(runId, agentId, jobId) as Array<{ step_id: string }>;
+  let withinCap = true;
+  updateRunContext(runId, (context) => {
+    const counts = readPauseCounts(context);
+    withinCap = steps.every((step) => (counts[step.step_id] ?? 0) < MAX_CONSECUTIVE_RATE_LIMIT_PAUSES);
+    if (!withinCap || steps.length === 0) return false;
+    for (const step of steps) counts[step.step_id] = (counts[step.step_id] ?? 0) + 1;
+    context[RATE_LIMIT_PAUSES_KEY] = JSON.stringify(counts);
+    return true;
+  });
+  return withinCap;
+}
+
+/** Forgets a step's consecutive rate-limit pauses once it completed or failed on its own. */
+export function resetRateLimitPauses(runId: string, stepName: string): void {
+  updateRunContext(runId, (context) => {
+    const counts = readPauseCounts(context);
+    if (!(stepName in counts)) return false;
+    delete counts[stepName];
+    context[RATE_LIMIT_PAUSES_KEY] = JSON.stringify(counts);
+    return true;
+  });
+}
+
+/**
+ * Re-queues the claimed steps and pauses the run atomically. Returns null, changing nothing, when a step
+ * already paused MAX_CONSECUTIVE_RATE_LIMIT_PAUSES times without progress: the caller treats it as a failure.
+ */
+export function suspendRunForRateLimit(runId: string, agentId: string, jobId: string, resumeAt: Date, detail: string): number | null {
   return inTransaction(() => {
+    if (!countRateLimitPauses(runId, agentId, jobId)) return null;
     const requeued = requeueClaimedSteps(runId, agentId, jobId);
     pauseRunForRateLimit(runId, resumeAt, detail);
     return requeued;
@@ -116,13 +176,11 @@ export function suspendRunForRateLimit(runId: string, agentId: string, jobId: st
 }
 
 export function clearRateLimitMarker(runId: string): void {
-  const db = getDb();
-  const row = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string } | undefined;
-  if (!row) return;
-  const context = readContext(row.context);
-  if (!(RATE_LIMIT_RESUME_KEY in context)) return;
-  delete context[RATE_LIMIT_RESUME_KEY];
-  db.prepare("UPDATE runs SET context = ? WHERE id = ?").run(JSON.stringify(context), runId);
+  updateRunContext(runId, (context) => {
+    if (!(RATE_LIMIT_RESUME_KEY in context)) return false;
+    delete context[RATE_LIMIT_RESUME_KEY];
+    return true;
+  });
 }
 
 export function resumeDueRateLimitedRuns(now: Date = new Date()): string[] {

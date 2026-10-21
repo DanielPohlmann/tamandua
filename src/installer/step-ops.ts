@@ -26,6 +26,7 @@ import {
 import { parseFindingsJson } from "./findings.js";
 import { detectOpenedPr } from "./notifications.js";
 import { enforceReadOnly, recordReadOnlyBaseline } from "./read-only.js";
+import { resetRateLimitPauses } from "./rate-limit.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Key-Value Parsing
@@ -1293,6 +1294,7 @@ export function completeStep(stepId: string, output: string): { status: string; 
     finalizeDrainingPause(runId);
     return readOnlyViolation;
   }
+  resetRateLimitPauses(runId, step.step_id);
 
   // Validate output against the expects column before accepting the step
   const validationError = validateExpects(output, step.expects);
@@ -1889,6 +1891,7 @@ export async function failStep(stepId: string, error: string): Promise<{ status:
     finalizeDrainingPause(step.run_id);
     return readOnlyViolation;
   }
+  resetRateLimitPauses(step.run_id, step.step_id);
 
   // Loop step failure — per-story retry
   if (step.type === "loop" && step.current_story_id) {

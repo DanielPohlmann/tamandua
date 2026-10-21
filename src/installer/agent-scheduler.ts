@@ -11,7 +11,7 @@ import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
 import { emitEvent } from "./events.js";
 import { claudeDisallowedTools } from "./read-only.js";
-import { RateLimitError, parseRateLimitWait, rateLimitFromClaudeResult, suspendRunForRateLimit } from "./rate-limit.js";
+import { RateLimitError, rateLimitFromClaudeResult, rateLimitFromFailedRun, suspendRunForRateLimit } from "./rate-limit.js";
 import { parsePiOutputStream } from "./pi-stream-parser.js";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -782,8 +782,7 @@ export async function runClaude(
           stderrPreview: failureStderrMeta.preview,
           stderrTruncated: failureStderrMeta.truncated,
         });
-        const rateLimitWait = parseRateLimitWait(`${stdoutPieces.join("")}
-${failureStderr}`);
+        const rateLimitWait = rateLimitFromFailedRun(failureStderr, stdoutPieces.join(""));
         if (rateLimitWait !== null) {
           reject(new RateLimitError(rateLimitWait, `claude usage limit reached; retry in ${Math.round(rateLimitWait / 60_000)} min`));
           return;
@@ -1818,8 +1817,11 @@ export async function executePollingRound(
     if (err instanceof RateLimitError) {
       const resumeAt = new Date(Date.now() + err.waitMs);
       const requeued = suspendRunForRateLimit(job.runId, job.agentId, job.id, resumeAt, err.message);
-      logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
-      return;
+      if (requeued !== null) {
+        logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
+        return;
+      }
+      logger.warn("Usage limit hit repeatedly without progress — handling it as a failure", { ...context });
     }
     const errorMessage = err instanceof Error ? err.message : String(err);
     const errorSummary = buildBoundedPreview(errorMessage, MAX_POLLING_ERROR_PREVIEW);
