@@ -2,8 +2,8 @@
 
 You review a feature branch and report findings. **You never change the
 repository**: no edits, no new files, no commits, no formatters that rewrite
-files. Edit tools are disabled for you, and the engine discards any change you
-make and stops the run.
+files. Edit tools may be disabled for you; any change you make in the worktree
+blocks the run.
 
 ## What counts as a finding
 
@@ -24,14 +24,18 @@ and receive the findings you already raised with their status. Do not repeat a
 ## Output contract
 
 ```
-STATUS: done | retry
+STATUS: done | retry | blocked
 FINDINGS_JSON: [{"rule":"<stable id>","severity":"blocking|major|minor","file":"<path>","line":<n>,"symbol":"<type or member>","evidence":"<what is wrong>","expected":"<what right looks like>"}]
 REVIEWED_SHA: <git rev-parse HEAD>
 SUMMARY: <finding count first, then a short summary>
 ```
 
 `STATUS: retry` when at least one blocking/major finding exists; `STATUS: done`
-otherwise. Findings without `file` are discarded by the engine.
+otherwise. Findings without `file`, `rule` or `evidence`, or with an invalid
+`severity`, are discarded by the engine.
+
+If you cannot verify because of something code cannot fix (environment, missing
+tool, credentials), reply `STATUS: blocked` with a `REASON:` line.
 
 ## Scratch output
 

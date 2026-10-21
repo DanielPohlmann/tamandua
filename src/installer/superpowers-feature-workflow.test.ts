@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadWorkflowSpec } from "../../dist/installer/workflow-spec.js";
+import { validateExpects } from "../../dist/installer/step-ops.js";
 
 const WORKFLOW_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "workflows", "superpowers-feature");
 
@@ -75,7 +76,11 @@ describe("superpowers-feature workflow", async () => {
     assert.match(pr.input, /STATUS: blocked/);
     assert.match(pr.input, /\{\{minor_findings\}\}/);
     assert.deepEqual(pr.on_fail, { fix_step: "fix", max_rounds: 2, return_step: "gate-ci-local" });
-    assert.equal(pr.expects, "regex:^STATUS: (done|retry|blocked)$");
+    const accepts = (output: string) => validateExpects(output, pr.expects!) === null;
+    assert.ok(accepts("STATUS: done\nPR: https://github.com/o/r/pull/1"));
+    assert.ok(!accepts("STATUS: done"));
+    assert.ok(accepts("STATUS: retry\nFINDINGS_JSON: []"));
+    assert.ok(accepts("STATUS: blocked\nREASON: gh not logged in"));
   });
 
   it("declares budgets and seeds the context keys the prompts use", () => {

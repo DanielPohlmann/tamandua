@@ -466,11 +466,11 @@ starts another experiment.
 
 ## Agent pipeline safety
 
-- **Read-only roles.** Verification, analysis, testing and scanning agents run with `--disallowedTools Edit,Write,NotebookEdit`. After each such step the engine checks the worktree; any untracked, non-ignored file blocks the run. Offending files are quarantined (never deleted) in `<git-common-dir>/tamandua-quarantine/<run>/<step>/`.
+- **Read-only roles.** Verification, analysis, testing and scanning agents run with `--disallowedTools Edit,Write,NotebookEdit`. After each such step the engine checks the worktree; any worktree change (untracked files, tracked edits, deletions, staging) blocks the run, as does a moved `HEAD` (which is not reverted). Offending files are quarantined (never deleted) in `<git-common-dir>/tamandua-quarantine/<run>/<step>/`, where `<step>` is the step's database id.
 - **Enforcement limits.** The `pi` and `hermes` harnesses get no `--disallowedTools`, so only the after-the-fact check applies. Ignored files, `.git` internals and writes outside the worktree are not detected, and read-only roles still have Bash.
-- **Usage limits.** When a harness hits a usage limit, the run pauses and resumes instead of failing.
+- **Usage limits.** When a harness hits a usage limit, the run pauses and resumes; after 5 consecutive pauses it becomes a failure.
 - **Token budget.** A run that exhausts its token budget blocks; raise it with `tamandua workflow resume <run> --max-tokens <n>`.
-- **Notifications.** Set `TAMANDUA_NOTIFY_URL` to receive a POST when a run blocks or finishes; add `TAMANDUA_NOTIFY_FORMAT=ntfy` for ntfy-style payloads.
+- **Notifications.** Set `TAMANDUA_NOTIFY_URL` to receive a POST per event. JSON mode (default) sends events such as `run.started`, `step.failed`, `step.worker_lost`, `pipeline.advanced`, `run.blocked` and `run.pr_opened`. With `TAMANDUA_NOTIFY_FORMAT=ntfy` only blocked, pr_opened, failed and completed are sent as ntfy messages (ntfy.sh hosts are auto-detected).
 
 ---
 

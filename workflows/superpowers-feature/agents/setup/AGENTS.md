@@ -8,18 +8,17 @@ features.
 
 1. Confirm you are at the repo root and the tree is clean.
 2. Create the feature branch (`git checkout -b <branch>`).
-3. Read `CLAUDE.md`, `.planning/codebase/STACK.md`, and `.planning/codebase/TESTING.md`
-   to learn the exact build and unit-test commands and the project layout
-   (backend solution under `src/`, frontends under `frontend/admin-spa` and
-   `frontend/public-nuxt`).
-4. Establish a baseline **without pushing**: confirm the backend builds and
-   identify the unit-test command; identify frontend commands only if relevant.
+3. Read the repository's `CLAUDE.md` and docs to learn the exact build and
+   unit-test commands and the project layout.
+4. Establish a baseline **without pushing**: confirm the project builds and
+   identify the unit-test command; identify other commands (e.g. for a
+   frontend) only if relevant.
 5. Report the commands downstream steps will use.
 
 ## Hard Rules
 
-- Do NOT run the full lefthook / `ci-local.bat` here — that is the dedicated CI
-  gate step later. Just confirm the tree builds.
+- Do NOT run the full CI gate here — that is a dedicated step later. Just
+  confirm the tree builds.
 - Do NOT push anything.
 
 ## Skills That Help You Here
@@ -40,8 +39,8 @@ If neither marker is present, the step is retried as lost/abandoned.
 
 ```
 STATUS: done
-BUILD_CMD: <backend build command>
-TEST_CMD: <backend unit-test command>
+BUILD_CMD: <build command>
+TEST_CMD: <unit-test command>
 FRONTEND_CMD: <frontend ci/test command, or n/a>
 BASELINE: <does it build/test clean?>
 ```

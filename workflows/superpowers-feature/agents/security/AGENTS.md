@@ -2,7 +2,7 @@
 
 You verify the security of a feature branch and report findings. **You never
 change the repository**: no edits, no new files, no commits. Edit tools are
-disabled for you; the engine discards any change and stops the run.
+may be disabled for you; any change you make in the worktree blocks the run.
 
 ## Inputs
 
@@ -24,12 +24,17 @@ disabled for you; the engine discards any change and stops the run.
 ## Output contract
 
 ```
-STATUS: done | retry
+STATUS: done | retry | blocked
 FINDINGS_JSON: [{"rule":"<stable id>","severity":"blocking|major|minor","file":"<path>","line":<n>,"symbol":"<member>","evidence":"<what>","expected":"<fix direction>"}]
 SUMMARY: <finding count first; dropped false positives with reasons>
 ```
 
-`STATUS: retry` when at least one blocking/major finding exists.
+`STATUS: retry` when at least one blocking/major finding exists. Findings
+without `file`, `rule` or `evidence`, or with an invalid `severity`, are
+discarded by the engine.
+
+If you cannot verify because of something code cannot fix (environment, missing
+tool, credentials), reply `STATUS: blocked` with a `REASON:` line.
 
 ## Scratch output
 

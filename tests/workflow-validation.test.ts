@@ -198,7 +198,11 @@ describe("workflow structure", () => {
       const spec = await loadWorkflowSpec(wfDir(id));
       const agentIds = new Set(spec.agents.map((a) => a.id));
       for (const step of spec.steps) {
-        assert.ok(step.type === "bash" || agentIds.has(step.agent),
+        if (step.type === "bash") {
+          assert.ok(step.run && step.run.trim() !== "", `${id}: bash step "${step.id}" must declare a non-empty run`);
+          continue;
+        }
+        assert.ok(agentIds.has(step.agent),
           `${id}: step "${step.id}" references unknown agent "${step.agent}"`);
       }
     }

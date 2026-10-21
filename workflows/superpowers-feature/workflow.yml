@@ -5,8 +5,8 @@
 # implement drives each plan with superpowers:executing-plans (TDD) and verify
 # checks each plan. Then deterministic gates run cheapest-first:
 #
-#   unit -> security (checks + verifier) -> review (checks + verifier)
-#        -> e2e (checks + verifier) -> ci-local -> pr
+#   unit, then security (checks + verifier), review (checks + verifier),
+#   e2e (checks + verifier), ci-local, and finally pr
 #
 # Gate commands live in the TARGET repository (scripts/gates/*.mjs); a non-zero
 # exit fails the gate. Verifier agents are read-only: they only report
@@ -122,6 +122,7 @@ agents:
     name: PR Publisher
     role: pr
     description: Pushes the branch through the pre-push hook and opens the PR. Never merges.
+    timeoutSeconds: 2400
     workspace:
       baseDir: agents/pr
       skills:
@@ -198,16 +199,14 @@ steps:
       Instructions:
       1. Ensure you are at the repo root ({{repo}}).
       2. Create the feature branch: git checkout -b {{branch}} (if it already exists, just check it out).
-      3. Read CLAUDE.md and .planning/codebase/STACK.md + TESTING.md to learn the exact build/test commands and project layout.
-      4. Establish a baseline WITHOUT pushing:
-         - Backend: build the solution and identify the unit-test command.
-         - Frontends (frontend/admin-spa, frontend/public-nuxt): identify their commands only if the plan touches them.
-      5. Do NOT run the full lefthook/ci-local here — only enough to confirm the tree builds.
+      3. Read the repository's CLAUDE.md and docs to learn the exact build and test commands and the project layout.
+      4. Establish a baseline WITHOUT pushing: confirm the project builds and identify the unit-test command; identify other commands (e.g. for a frontend) only if the plan touches them.
+      5. Do NOT run the full CI gate here — only enough to confirm the tree builds.
 
       Reply with:
       STATUS: done
-      BUILD_CMD: <backend build command>
-      TEST_CMD: <backend unit-test command>
+      BUILD_CMD: <build command>
+      TEST_CMD: <unit-test command>
       FRONTEND_CMD: <frontend ci/test command, or "n/a">
       BASELINE: <baseline result — does it build/test clean?>
     expects: "STATUS: done"
@@ -367,6 +366,10 @@ steps:
       STATUS: retry
       FINDINGS_JSON: [{"rule":"...","severity":"blocking|major|minor","file":"...","line":1,"symbol":"...","evidence":"...","expected":"..."}]
       SUMMARY: <finding count first>
+
+      If you cannot verify because of something code cannot fix (environment, missing tool, credentials), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
     expects: "regex:^STATUS: (done|retry|blocked)$"
     max_retries: 2
     on_fail: { fix_step: fix, max_rounds: 3 }
@@ -416,6 +419,10 @@ steps:
       FINDINGS_JSON: [{"rule":"...","severity":"blocking|major|minor","file":"...","line":1,"symbol":"...","evidence":"...","expected":"..."}]
       REVIEWED_SHA: <sha>
       SUMMARY: <finding count first>
+
+      If you cannot verify because of something code cannot fix (environment, missing tool, credentials), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
     expects: "regex:^STATUS: (done|retry|blocked)$"
     max_retries: 2
     on_fail: { fix_step: fix, max_rounds: 3 }
@@ -430,7 +437,7 @@ steps:
     input: |
       Acceptance verification in a real browser. You are READ-ONLY: never edit,
       create, delete or commit files in the repository. Keep browser artifacts
-      (snapshots, screenshots, traces) in your OS temp directory, never in the repo.
+      (snapshots, screenshots, traces) in gitignored directories or the OS temp dir, never in the repo.
 
       FEATURE COMPLETE: {{feature_complete}}
       If FEATURE COMPLETE is 'false', reply immediately:
@@ -462,6 +469,10 @@ steps:
       STATUS: retry
       FINDINGS_JSON: [{"rule":"...","severity":"blocking|major|minor","file":"...","symbol":"...","evidence":"...","expected":"..."}]
       SUMMARY: <finding count first>
+
+      If you cannot verify because of something code cannot fix (environment, missing tool, credentials), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
     expects: "regex:^STATUS: (done|retry|blocked)$"
     max_retries: 2
     on_fail: { fix_step: fix, max_rounds: 3 }
@@ -491,7 +502,7 @@ steps:
       Instructions:
       1. Push with the hooks enabled — NEVER pass --no-verify:
          git push -u origin {{branch}}
-         The pre-push hook may run the local CI gate; it skips when the pipeline already passed for this commit.
+         The repository's pre-push hook, if any, runs here.
       2. If the push fails because a HOOK failed (lint, build, tests, scans), do not fix anything yourself. Reply:
          STATUS: retry
          FINDINGS_JSON: [{"rule":"gate/pre-push","severity":"blocking","file":".","evidence":"<last 200 lines of the hook output>"}]
@@ -505,7 +516,7 @@ steps:
       On success reply:
       STATUS: done
       PR: <URL of the pull request>
-    expects: "regex:^STATUS: (done|retry|blocked)$"
+    expects: "regex:^STATUS: (retry|blocked)$|^PR:\\s*https?://\\S+"
     max_retries: 2
     on_fail: { fix_step: fix, max_rounds: 2, return_step: gate-ci-local }
 
