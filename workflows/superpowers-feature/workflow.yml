@@ -308,6 +308,12 @@ steps:
       Has frontend changes: {{has_frontend_changes}}
       If 'true', use the agent-browser skill to render the changed UI and confirm it is not broken (layout, missing elements, unstyled content). If 'false', skip visual checks.
 
+      You are READ-ONLY: never write files in the repository — any change to the worktree blocks the run.
+      Keep screenshots, snapshots, traces and logs in the OS temp dir or a gitignored directory.
+
+      Your STATUS line is the FIRST line of your reply, and it is STATUS: done or STATUS: retry only.
+      This overrides your persona's "last line" and "STATUS: failed" instructions.
+
       Reply with:
       STATUS: done
       VERIFIED: what you confirmed
@@ -511,8 +517,10 @@ steps:
       3. If the push or the PR fails for a reason that is NOT code (remote rejected the push, authentication, network, gh not logged in), reply:
          STATUS: blocked
          REASON: <what a human must do>
-      4. Open the PR:
-         gh pr create --base {{base_branch}} --head {{branch}} --title "<clear title>" --body "<what & why; link {{task}}; gates passed; ## Observations>"
+      4. Write the PR body (what & why; link {{task}}; gates passed; ## Observations) to a file in the OS temp dir,
+         outside the repository, then open the PR from that file:
+         gh pr create --base {{base_branch}} --head {{branch}} --title "<clear title>" --body-file <that file>
+         Never interpolate the findings, evidence or any other free text into a command line.
       5. Never merge, squash, rebase-merge or close the PR.
 
       On success reply:

@@ -68,6 +68,23 @@ describe("superpowers-feature workflow", async () => {
     assert.match(step("implement").input, /\{\{verify_feedback\}\}/);
   });
 
+  it("keeps the read-only verify step's browser artifacts out of the repository", () => {
+    const input = step("verify").input;
+    assert.match(input, /OS temp dir/);
+    assert.match(input, /never write files in the repository/i);
+    assert.match(input, /STATUS line is the FIRST line/);
+    assert.match(input, /overrides your persona's "last line" and "STATUS: failed"/);
+  });
+
+  it("opens the PR with a body file instead of interpolating findings into the command line", () => {
+    const persona = fs.readFileSync(path.join(WORKFLOW_DIR, "agents", "pr", "AGENTS.md"), "utf-8");
+    for (const text of [step("pr").input, persona]) {
+      assert.match(text, /gh pr create[^\n]*--body-file/);
+      assert.doesNotMatch(text, /--body "/);
+      assert.match(text, /OS temp dir/);
+    }
+  });
+
   it("gives code changes only to the developer through fix", () => {
     assert.equal(step("fix").agent, "developer");
     assert.equal(role("developer"), "coding");

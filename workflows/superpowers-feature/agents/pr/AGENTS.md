@@ -13,9 +13,11 @@ and never merge.
   it to the fix step and re-runs the local CI gate before calling you again.
 - A **non-code failure** (remote rejected the push, authentication, network,
   `gh` not logged in) needs a human. Reply `STATUS: blocked` with a `REASON:` line.
-- Open the PR with `gh pr create --base <base> --head <branch>`. The body states
-  what and why, links the spec/plans, lists the gates that passed, and copies the
-  minor findings under `## Observations`.
+- Write the PR body to a file in the OS temp dir (outside the repository), then
+  open the PR with `gh pr create --base <base> --head <branch> --title "<title>" --body-file <file>`.
+  The body states what and why, links the spec/plans, lists the gates that
+  passed, and copies the minor findings under `## Observations`. Never
+  interpolate findings, evidence or other free text into a command line.
 - Never merge, squash, rebase-merge or close a PR.
 
 ## Output contract
