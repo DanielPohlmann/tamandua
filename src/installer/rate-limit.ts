@@ -1,4 +1,4 @@
-import { getDb } from "../db.js";
+import { getDb, inTransaction } from "../db.js";
 import { emitEvent } from "./events.js";
 import { clearReadOnlyBaseline } from "./read-only.js";
 
@@ -54,25 +54,6 @@ export function rateLimitFromClaudeResult(rawStdout: string, now: Date = new Dat
     return parseRateLimitWait(parsed.result, now);
   } catch {
     return null;
-  }
-}
-
-let transactionDepth = 0;
-
-function inTransaction<T>(fn: () => T): T {
-  if (transactionDepth > 0) return fn();
-  const db = getDb();
-  db.exec("BEGIN IMMEDIATE");
-  transactionDepth++;
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  } finally {
-    transactionDepth--;
   }
 }
 

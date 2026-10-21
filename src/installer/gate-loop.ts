@@ -1,4 +1,4 @@
-import { getDb } from "../db.js";
+import { getDb, inTransaction } from "../db.js";
 import { emitEvent } from "./events.js";
 import { logger } from "../lib/logger.js";
 import {
@@ -74,25 +74,6 @@ export function contextKeyFor(prefix: string, stepId: string): string {
 
 export function bashOutputContextKey(stepId: string): string {
   return `${stepId.replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}_output`;
-}
-
-let transactionDepth = 0;
-
-function inTransaction<T>(fn: () => T): T {
-  const db = getDb();
-  if (transactionDepth > 0) return fn();
-  db.exec("BEGIN IMMEDIATE");
-  transactionDepth++;
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  } finally {
-    transactionDepth--;
-  }
 }
 
 export function mergeRunContext(runId: string, patch: Record<string, string>): void {
