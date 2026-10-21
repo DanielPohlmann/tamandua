@@ -1,6 +1,8 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { getDb, closeDb } from "../../dist/db.js";
 import { resolveNotifyTarget, buildNtfyRequest, detectOpenedPr } from "../../dist/installer/notifications.js";
 import { emitEvent } from "../../dist/installer/events.js";
@@ -100,5 +102,32 @@ describe("ntfy delivery", () => {
     assert.ok(blocked);
     assert.equal(pr!.headers.click, "https://github.com/o/r/pull/9");
     assert.match(String(pr!.headers["content-type"]), /text\/plain/);
+  });
+});
+
+describe("ntfy hardening", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-notify-hardening-");
+    seedRun(getDb(), { id: "run-1" }, []);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  it("percent-encodes the Click URL and omits it when the URL does not parse", () => {
+    const encoded = buildNtfyRequest({ ts: "t", event: "run.pr_opened", runId: "run-1", detail: "https://github.com/o/r/pull/9?título=ação" });
+    assert.equal(encoded!.headers.Click, "https://github.com/o/r/pull/9?t%C3%ADtulo=a%C3%A7%C3%A3o");
+    const invalid = buildNtfyRequest({ ts: "t", event: "run.pr_opened", runId: "run-1", detail: "not a url" });
+    assert.equal("Click" in invalid!.headers, false);
+  });
+
+  it("logs only the origin of a notify URL whose delivery failed", async () => {
+    getDb().prepare("UPDATE runs SET notify_url = 'http://127.0.0.1:1/secret-topic', notify_format = 'ntfy' WHERE id = 'run-1'").run();
+    emitEvent({ ts: new Date().toISOString(), event: "run.blocked", runId: "run-1", stepId: "gate", detail: "stuck" });
+    const logFile = path.join(home.dir, ".tamandua", "tamandua.log");
+    const readLog = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf-8") : "");
+    for (let i = 0; i < 100 && !readLog().includes("Webhook POST failed"); i++) await new Promise((r) => setTimeout(r, 20));
+    const line = readLog().split("\n").find((l) => l.includes("Webhook POST failed")) ?? "";
+    assert.match(line, /http:\/\/127\.0\.0\.1:1/);
+    assert.doesNotMatch(line, /secret-topic/);
   });
 });

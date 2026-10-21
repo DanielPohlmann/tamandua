@@ -212,6 +212,14 @@ export function getEventsPath(): string {
 
 // ── Webhook Support ──────────────────────────────────────────────────
 
+function urlOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "(invalid url)";
+  }
+}
+
 /**
  * Fire-and-forget POST to the webhook URL configured for a run.
  * Looks up the notify_url from the runs table.
@@ -265,19 +273,20 @@ async function fireWebhook(evt: TamanduaEvent): Promise<void> {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
-
-    await fetch(notifyUrl, {
-      method: "POST",
-      headers,
-      body,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
+    try {
+      await fetch(notifyUrl, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (err) {
-    // Fire-and-forget: log and move on
+    // Fire-and-forget: log and move on. Only the origin is logged: the path may hold a secret topic or token.
     logger.warn("Webhook POST failed", {
-      url: notifyUrl,
+      url: urlOrigin(notifyUrl),
       event: evt.event,
       runId: evt.runId,
       error: String(err),

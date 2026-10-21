@@ -18,6 +18,15 @@ function isNtfyHost(url: string): boolean {
   }
 }
 
+/** A header-safe (percent-encoded) URL, or undefined when the value does not parse as one. */
+function asHeaderUrl(value: string | undefined): string | undefined {
+  try {
+    return value ? new URL(value).href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function resolveNotifyTarget(params: {
   explicitUrl?: string;
   explicitFormat?: NotifyFormat;
@@ -66,8 +75,9 @@ export function buildNtfyRequest(evt: TamanduaEvent): { body: string; headers: R
     };
   }
   if (evt.event === "run.pr_opened") {
+    const click = asHeaderUrl(evt.detail);
     return {
-      headers: { Title: `PR opened: ${label}`, Tags: "rocket", Priority: "default", Click: evt.detail ?? "" },
+      headers: { Title: `PR opened: ${label}`, Tags: "rocket", Priority: "default", ...(click ? { Click: click } : {}) },
       body: evt.detail ?? "PR opened",
     };
   }
