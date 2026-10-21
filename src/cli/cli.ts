@@ -2661,7 +2661,14 @@ async function main() {
       process.exit(1);
     }
     if (runStatus === "blocked") {
-      const result = await resumeBlockedRun(fullId, overrides);
+      let result: Awaited<ReturnType<typeof resumeBlockedRun>>;
+      try {
+        result = await resumeBlockedRun(fullId, overrides);
+      } catch (err) {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}
+`);
+        process.exit(1);
+      }
       if (result.status === "not_found") { console.log(`No blocked run found matching "${target}".`); return; }
       console.log(`Resumed run ${result.runId!.slice(0, 8)} (${result.workflowId}), re-running step: ${result.stepId}`);
       return;
@@ -2825,6 +2832,11 @@ async function main() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : `No run found matching "${target}".`;
+      if (args.includes("--json")) {
+        process.stderr.write(`${message}
+`);
+        process.exit(1);
+      }
       console.log(message.startsWith("No run found matching") ? `No run found matching "${target}".` : message);
     }
     return;
