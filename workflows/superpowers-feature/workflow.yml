@@ -20,6 +20,8 @@
 #     --worktree-origin-repository <path-to-your-repo> \
 #     --worktree-origin-ref develop
 # Override the PR/base branch per run with: --context base_branch=main
+# --worktree-origin-ref and --context base_branch= must name the same branch:
+# the worktree starts from the origin ref, while gates and the PR diff against base_branch.
 # Inspect: tamandua workflow status <run> --json | tamandua workflow findings <run>
 # Unblock: tamandua workflow resume <run> [--max-rounds n] [--max-fix-rounds n] [--max-tokens n]
 #

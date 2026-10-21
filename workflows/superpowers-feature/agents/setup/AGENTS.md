@@ -30,8 +30,8 @@ reflects how the whole system starts, not a single project.
 
 ## CRITICAL — STATUS Line Requirement
 
-- **On success:** the **last line** MUST be exactly `STATUS: done`.
-- **On failure:** end with `STATUS: failed` and a `REASON:` line.
+- **On success:** the **first line** of what you pipe to `step complete` MUST be exactly `STATUS: done`.
+- **On failure:** start with `STATUS: failed` and add a `REASON:` line.
 
 If neither marker is present, the step is retried as lost/abandoned.
 

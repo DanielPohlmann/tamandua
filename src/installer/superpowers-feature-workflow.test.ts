@@ -113,6 +113,21 @@ describe("superpowers-feature workflow", async () => {
     assert.ok(accepts("STATUS: blocked\nREASON: gh not logged in"));
   });
 
+  it("keeps the workflow's own personas consistent with the first-line STATUS contract", () => {
+    for (const persona of ["planner", "setup"]) {
+      const text = fs.readFileSync(path.join(WORKFLOW_DIR, "agents", persona, "AGENTS.md"), "utf-8");
+      assert.doesNotMatch(text, /last line/i, persona);
+      assert.match(text, /first line/i, persona);
+    }
+    const security = fs.readFileSync(path.join(WORKFLOW_DIR, "agents", "security", "AGENTS.md"), "utf-8");
+    assert.doesNotMatch(security, /are\s+may/);
+  });
+
+  it("documents that the worktree origin ref and base_branch must name the same branch", () => {
+    const yml = fs.readFileSync(path.join(WORKFLOW_DIR, "workflow.yml"), "utf-8");
+    assert.match(yml, /--worktree-origin-ref and --context base_branch= must name the same branch/);
+  });
+
   it("declares budgets and seeds the context keys the prompts use", () => {
     assert.deepEqual(spec.budgets, { max_fix_rounds: 8 });
     assert.equal(spec.context?.base_branch, "develop");
