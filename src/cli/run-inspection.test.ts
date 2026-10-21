@@ -9,6 +9,7 @@ import {
   formatFindingsText,
   parseResumeOverrides,
   hasOverrides,
+  describeBlockedResume,
 } from "../../dist/cli/run-inspection.js";
 
 const DETAIL = {
@@ -47,6 +48,14 @@ describe("buildRunStatusJson", () => {
     assert.equal(json.currentStepId, "gate-review");
     assert.equal(json.blockedReason, "disputed");
     assert.deepEqual(json.context, {});
+  });
+
+  it("prefers the running step over a pending one", () => {
+    const steps = [
+      { stepId: "gate-review", agentId: "wf_reviewer", status: "pending", type: "single", retryCount: 0 },
+      { stepId: "fix", agentId: "wf_developer", status: "running", type: "single", retryCount: 0 },
+    ];
+    assert.equal(buildRunStatusJson({ ...DETAIL, steps } as never, {}).currentStepId, "fix");
   });
 
   it("exposes the rate-limit resume time as pausedUntil", () => {
@@ -91,5 +100,19 @@ describe("formatFindingsText", () => {
     } as never]);
     assert.equal(text, "[open     ] major    gate-review  review/naming  src/A.cs:3  abcdef01  bad");
     assert.equal(formatFindingsText([]), "No findings.");
+  });
+});
+
+describe("describeBlockedResume", () => {
+  it("reports a resumed run on stdout", () => {
+    const report = describeBlockedResume(
+      { status: "resumed", runId: "11111111-2222", workflowId: "wf", stepId: "gate-review" }, "1111");
+    assert.deepEqual(report, { ok: true, message: "Resumed run 11111111 (wf), re-running step: gate-review" });
+  });
+
+  it("reports a run that left blocked before it could be resumed as an error", () => {
+    const report = describeBlockedResume({ status: "not_found" }, "1111");
+    assert.equal(report.ok, false);
+    assert.match(report.message, /is no longer blocked/);
   });
 });

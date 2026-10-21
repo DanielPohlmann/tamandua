@@ -62,6 +62,12 @@ describe("workflow findings / status --json", () => {
     assert.match(cli(["workflow", "findings", "--help"], home.dir), /tamandua workflow findings <query>/);
   });
 
+  it("documents that a failed run resumes under the same run id", () => {
+    const help = cli(["workflow", "resume", "--help"], home.dir);
+    assert.match(help, /same run id/);
+    assert.doesNotMatch(help, /new run entry/);
+  });
+
   it("status --json fails with empty stdout for an unknown run", () => {
     const r = cliResult(["workflow", "status", "ffffffff", "--json"], home.dir);
     assert.equal(r.status, 1);

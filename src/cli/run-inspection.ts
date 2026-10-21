@@ -2,6 +2,7 @@ import { getDb } from "../db.js";
 import type { RunDetail } from "../installer/status.js";
 import type { FindingStatus, StoredFinding } from "../installer/findings.js";
 import type { BudgetOverrides } from "../installer/gate-loop.js";
+import type { ResumeResult } from "../installer/run.js";
 import { RATE_LIMIT_RESUME_KEY } from "../installer/rate-limit.js";
 
 export interface RunStatusJson {
@@ -29,7 +30,7 @@ export function loadRunContext(runId: string): Record<string, string> {
 }
 
 export function buildRunStatusJson(detail: RunDetail, context: Record<string, string>): RunStatusJson {
-  const active = detail.steps.find((s) => s.status === "pending") ?? detail.steps.find((s) => s.status === "running");
+  const active = detail.steps.find((s) => s.status === "running") ?? detail.steps.find((s) => s.status === "pending");
   const pr = context.pr?.trim();
   return {
     id: detail.id,
@@ -40,6 +41,17 @@ export function buildRunStatusJson(detail: RunDetail, context: Record<string, st
     pausedUntil: context[RATE_LIMIT_RESUME_KEY] ?? null,
     tokensSpent: detail.tokensSpent,
     context: pr ? { pr } : {},
+  };
+}
+
+/** The status check saw the run blocked, so a not_found result means it left that state in the meantime. */
+export function describeBlockedResume(result: ResumeResult, target: string): { ok: boolean; message: string } {
+  if (result.status === "not_found") {
+    return { ok: false, message: `Run "${target}" is no longer blocked; check it with: tamandua workflow status ${target}` };
+  }
+  return {
+    ok: true,
+    message: `Resumed run ${result.runId!.slice(0, 8)} (${result.workflowId}), re-running step: ${result.stepId}`,
   };
 }
 

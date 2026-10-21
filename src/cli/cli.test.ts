@@ -1491,6 +1491,7 @@ describe("--help infrastructure", () => {
       assert.match(result.stdout ?? "", /Resume a paused or failed workflow/);
       assert.match(result.stdout ?? "", /paused.*Connects to the dashboard daemon/);
       assert.match(result.stdout ?? "", /failed.*Restarts the run/);
+      assert.match(result.stdout ?? "", /same run id/);
       assert.match(result.stdout ?? "", /completed.*cannot be resumed/);
       assert.doesNotMatch(result.stdout ?? "", /tamandua get-ready/);
     } finally {

@@ -14,7 +14,7 @@ import { getWorkflowStatus, listRuns, stopWorkflow, deleteWorkflow, type RunInfo
 import { runWorkflow, resumeWorkflow, resumeBlockedRun, type RunWorkflowResult } from "../installer/run.js";
 import { listFindings } from "../installer/findings.js";
 import { applyBudgetOverrides } from "../installer/gate-loop.js";
-import { buildRunStatusJson, formatFindingsText, hasOverrides, loadRunContext, parseFindingsArgs, parseResumeOverrides } from "./run-inspection.js";
+import { buildRunStatusJson, describeBlockedResume, formatFindingsText, hasOverrides, loadRunContext, parseFindingsArgs, parseResumeOverrides } from "./run-inspection.js";
 import { listBundledWorkflows, getWorkflowShortDescription } from "../installer/workflow-fetch.js";
 import { loadWorkflowSpec } from "../installer/workflow-spec.js";
 import { resolveBundledWorkflowDir } from "../installer/paths.js";
@@ -1223,8 +1223,9 @@ prefix matching.
 Behavior by status:
   paused    Connects to the dashboard daemon and resumes agent polling.
             The daemon must be running for this to work.
-  failed    Restarts the run from the failed step, creating a new run
-            entry. The daemon is notified of the new run automatically.
+  failed    Restarts the run under the same run id: the first failed step
+            and every step after it are re-queued. The daemon is notified
+            automatically.
   blocked   Re-queues the step that blocked the run (gate, fix or pr) on the
             current worktree HEAD, resets that step's fix-round counter and
             keeps the findings history.
@@ -2665,12 +2666,12 @@ async function main() {
       try {
         result = await resumeBlockedRun(fullId, overrides);
       } catch (err) {
-        process.stderr.write(`${err instanceof Error ? err.message : String(err)}
-`);
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
         process.exit(1);
       }
-      if (result.status === "not_found") { console.log(`No blocked run found matching "${target}".`); return; }
-      console.log(`Resumed run ${result.runId!.slice(0, 8)} (${result.workflowId}), re-running step: ${result.stepId}`);
+      const report = describeBlockedResume(result, target);
+      if (!report.ok) { process.stderr.write(`${report.message}\n`); process.exit(1); }
+      console.log(report.message);
       return;
     }
     if (hasOverrides(overrides) && runStatus !== "completed" && runStatus !== "canceled") {
