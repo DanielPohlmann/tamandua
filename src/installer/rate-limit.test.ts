@@ -13,9 +13,10 @@ import {
   rateLimitFromFailedRun,
   resetRateLimitPauses,
   MAX_CONSECUTIVE_RATE_LIMIT_PAUSES,
+  RateLimitError,
 } from "../../dist/installer/rate-limit.js";
 import { completeStep } from "../../dist/installer/step-ops.js";
-import { executePollingRound } from "../../dist/installer/agent-scheduler.js";
+import { executePollingRound, suspendRoundForRateLimit } from "../../dist/installer/agent-scheduler.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
 describe("parseRateLimitWait", () => {
@@ -163,6 +164,21 @@ describe("pause and resume", () => {
     completeStep("s-review", "STATUS: done");
     const context = JSON.parse((getDb().prepare("SELECT context FROM runs WHERE id = 'run-1'").get() as { context: string }).context);
     assert.equal(JSON.parse(context.rate_limit_pauses ?? "{}")["gate-review"], undefined);
+  });
+
+  it("falls back to the normal recovery path when suspending the run throws", () => {
+    getDb().exec("CREATE TRIGGER fail_pause BEFORE UPDATE OF status ON runs BEGIN SELECT RAISE(ABORT, 'db down'); END");
+    const job = { id: "job-1", runId: "run-1", agentId: "wf_reviewer" };
+    assert.equal(suspendRoundForRateLimit(job as never, {}, new RateLimitError(60_000, "limit")), false);
+    const step = getDb().prepare("SELECT status FROM steps WHERE id = 's-review'").get() as { status: string };
+    assert.equal(step.status, "running");
+  });
+
+  it("reports a suspended round so the polling round stops there", () => {
+    const job = { id: "job-1", runId: "run-1", agentId: "wf_reviewer" };
+    assert.equal(suspendRoundForRateLimit(job as never, {}, new RateLimitError(60_000, "limit")), true);
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "paused");
   });
 
   it("skips a malformed row without aborting the others", () => {

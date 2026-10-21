@@ -1586,6 +1586,33 @@ export function buildPollingRoundContext(
   };
 }
 
+/**
+ * Pauses the run for a usage limit. False means the round was not suspended (pause cap reached or the
+ * suspension itself failed) and the caller must take the normal failure/recovery path.
+ */
+export function suspendRoundForRateLimit(
+  job: Pick<CronJobInfo, "id" | "runId" | "agentId">,
+  context: Record<string, unknown>,
+  err: RateLimitError,
+): boolean {
+  const resumeAt = new Date(Date.now() + err.waitMs);
+  try {
+    const requeued = suspendRunForRateLimit(job.runId, job.agentId, job.id, resumeAt, err.message);
+    if (requeued === null) {
+      logger.warn("Usage limit hit repeatedly without progress — handling it as a failure", { ...context });
+      return false;
+    }
+    logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
+    return true;
+  } catch (suspendErr) {
+    logger.error("Could not pause the run for a usage limit — handling it as a failure", {
+      ...context,
+      error: suspendErr instanceof Error ? suspendErr.message : String(suspendErr),
+    });
+    return false;
+  }
+}
+
 export async function executePollingRound(
   job: CronJobInfo,
   agent: WorkflowAgent,
@@ -1814,15 +1841,7 @@ export async function executePollingRound(
       }
     }
   } catch (err) {
-    if (err instanceof RateLimitError) {
-      const resumeAt = new Date(Date.now() + err.waitMs);
-      const requeued = suspendRunForRateLimit(job.runId, job.agentId, job.id, resumeAt, err.message);
-      if (requeued !== null) {
-        logger.warn("Polling round hit a usage limit — run paused", { ...context, resumeAt: resumeAt.toISOString(), requeued });
-        return;
-      }
-      logger.warn("Usage limit hit repeatedly without progress — handling it as a failure", { ...context });
-    }
+    if (err instanceof RateLimitError && suspendRoundForRateLimit(job, context, err)) return;
     const errorMessage = err instanceof Error ? err.message : String(err);
     const errorSummary = buildBoundedPreview(errorMessage, MAX_POLLING_ERROR_PREVIEW);
 
