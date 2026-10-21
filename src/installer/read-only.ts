@@ -10,6 +10,7 @@ import type { AgentRole } from "./types.js";
 export const READ_ONLY_ROLES: ReadonlySet<AgentRole> = new Set<AgentRole>(["verification", "analysis", "testing", "scanning"]);
 const DISALLOWED_EDIT_TOOLS = ["Edit", "Write", "NotebookEdit"];
 const BASELINE_REF_PREFIX = "refs/tamandua/baseline/";
+const RECOVERY_REF_PREFIX = "refs/tamandua/recovery/";
 const QUARANTINE_DIR = "tamandua-quarantine";
 const RENAMED_SOURCE = "R~";
 const NUL = String.fromCharCode(0);
@@ -319,6 +320,18 @@ function baselineRef(stepDbId: string): string {
   return `${BASELINE_REF_PREFIX}${stepDbId}`;
 }
 
+/** Copies the claim-time stash to a ref of its own, so re-claiming the step cannot repoint it. */
+function pinRecoveryRef(worktree: string, stepDbId: string, stash: string): string {
+  const ref = `${RECOVERY_REF_PREFIX}${stepDbId}/${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  try {
+    git(worktree, ["update-ref", ref, stash], { timeout: 30_000 });
+    return ref;
+  } catch (err) {
+    logger.warn("Could not pin read-only recovery ref", { stepDbId, error: String(err) });
+    return baselineRef(stepDbId);
+  }
+}
+
 function dropBaselineRef(worktree: string, stepDbId: string): void {
   try {
     git(worktree, ["update-ref", "-d", baselineRef(stepDbId)], { timeout: 30_000 });
@@ -360,9 +373,11 @@ export function enforceReadOnly(
     const baseline = parseSnapshot(step.worktree_baseline);
     if (!baseline) return null;
     const header = `Read-only step "${step.step_id}" (role ${step.agent_role}) modified the worktree`;
-    const recovery = baseline.stash
-      ? [`Recover the claim-time state from ${baseline.stash} (pinned as ${baselineRef(step.id)}), e.g. git checkout ${baseline.stash} -- <path>.`]
-      : [];
+    const recovery = () => {
+      if (!baseline.stash) return [];
+      const ref = pinRecoveryRef(worktree, step.id, baseline.stash);
+      return [`Recover the claim-time state from ${baseline.stash} (pinned as ${ref}), e.g. git checkout ${baseline.stash} -- <path>.`];
+    };
 
     let head = "";
     let currentJson = "";
@@ -384,7 +399,7 @@ export function enforceReadOnly(
       return violation(step, [
         `${header}, or the worktree state could not be read (${unreadable}).`,
         "Nothing was discarded; inspect the worktree manually.",
-        ...recovery,
+        ...recovery(),
       ], output);
     }
     if (headMoved()) {
@@ -392,7 +407,7 @@ export function enforceReadOnly(
       return violation(step, [
         `${header}: HEAD moved from ${baseline.head || "(none)"} to ${head || "(none)"}.`,
         "Nothing was reset or discarded automatically; a human must review the branch.",
-        ...recovery,
+        ...recovery(),
       ], output);
     }
     if (changed.length === 0) return null;

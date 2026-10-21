@@ -209,7 +209,7 @@ describe("enforceReadOnly", () => {
     }
   };
 
-  it("blocks without resetting anything when HEAD moved, keeping the baseline ref for recovery", () => {
+  it("blocks without resetting anything when HEAD moved, keeping the baseline and recovery refs", () => {
     fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
     recordReadOnlyBaseline("s-review", "verification", repo);
     const stash = git("rev-parse", ref).trim();
@@ -222,17 +222,33 @@ describe("enforceReadOnly", () => {
     const [finding] = listFindings("run-1");
     assert.match(finding.evidence, /HEAD moved from [0-9a-f]{40} to [0-9a-f]{40}/);
     assert.ok(finding.evidence.includes(stash));
-    assert.ok(finding.evidence.includes(ref));
+    assert.ok(finding.evidence.includes("pinned as refs/tamandua/recovery/s-review/"), finding.evidence);
     assert.equal(refExists(), true);
   });
 
-  it("keeps the baseline ref and names it when the worktree cannot be read", () => {
+  it("pins the claim-time state under a recovery ref that a later re-claim cannot overwrite", () => {
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    const stash = git("rev-parse", ref).trim();
+    git("commit", "-qam", "step commit");
+    assert.equal(violation()?.status, "blocked");
+    const [finding] = listFindings("run-1");
+    const recoveryRef = finding.evidence.match(/refs\/tamandua\/recovery\/s-review\/[^\s),]+/)?.[0];
+    assert.ok(recoveryRef, finding.evidence);
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty again\n");
+    recordReadOnlyBaseline("s-review", "verification", repo);
+    assert.notEqual(git("rev-parse", ref).trim(), stash);
+    assert.equal(git("rev-parse", recoveryRef).trim(), stash);
+  });
+
+  it("keeps the baseline ref and names a recovery ref when the worktree cannot be read", () => {
     fs.writeFileSync(path.join(repo, "tracked.txt"), "dirty\n");
     recordReadOnlyBaseline("s-review", "verification", repo);
     fs.writeFileSync(path.join(repo, ".git", "index.lock"), "");
     assert.equal(violation()?.status, "blocked");
     const [finding] = listFindings("run-1");
-    assert.ok(finding.evidence.includes(ref));
+    assert.ok(finding.evidence.includes("pinned as refs/tamandua/recovery/s-review/"), finding.evidence);
     assert.equal(refExists(), true);
   });
 
