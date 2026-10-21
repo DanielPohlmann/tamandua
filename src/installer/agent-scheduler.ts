@@ -893,8 +893,8 @@ async function buildAgentPersonaInstructions(agentId: string): Promise<string> {
 export const STEP_OUTPUT_CONTRACT = [
   `─── STEP OUTPUT CONTRACT ───`,
   `- The text you pipe to "step complete" starts with a first line "STATUS: done|retry|blocked", using the value your instructions allow. A gate that found problems completes with STATUS: retry; STATUS: blocked also needs a "REASON: <why>" line.`,
-  `- Every other field is its own "KEY: value" line with an UPPER_SNAKE_CASE key (e.g. CHANGES:, PR:, REVIEWED_SHA:). These lines are merged into the run context; keys the engine reserves for itself are ignored.`,
-  `- JSON fields are a single line of valid JSON right after the key, with no prose after it on that line: FINDINGS_JSON: [...] for gates, RESOLVED: [...] and DISPUTED_JSON: [...] for fix steps (also STORIES_JSON when your instructions ask for it).`,
+  `- Every other field is its own "KEY: value" line whose key is uppercase letters and underscores only, no digits (e.g. CHANGES:, PR:, REVIEWED_SHA:). These lines are merged into the run context; keys the engine reserves for itself are ignored.`,
+  `- JSON fields are a single line of valid JSON right after the key, with no prose after it on that line: FINDINGS_JSON: [...] for gates; for fix steps RESOLVED: ["<fingerprint>", ...] and DISPUTED_JSON: [{"fingerprint":"<fingerprint>","reason":"<why>"}, ...] (also STORIES_JSON when your instructions ask for it).`,
   `- Each finding is an object with rule, severity (blocking|major|minor), file and evidence.`,
   `- Use "step fail" only when you could not do the work at all.`,
 ].join("\n");

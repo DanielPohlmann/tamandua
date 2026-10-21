@@ -32,6 +32,10 @@ describe("polling prompt protocol", () => {
     assert.match(STEP_OUTPUT_CONTRACT, /RESOLVED: \[/);
     assert.match(STEP_OUTPUT_CONTRACT, /DISPUTED_JSON: \[/);
     assert.match(STEP_OUTPUT_CONTRACT, /blocking\|major\|minor/);
+    assert.match(STEP_OUTPUT_CONTRACT, /uppercase letters and underscores/);
+    assert.match(STEP_OUTPUT_CONTRACT, /no digits/);
+    assert.match(STEP_OUTPUT_CONTRACT, /RESOLVED: \["<fingerprint>"/);
+    assert.match(STEP_OUTPUT_CONTRACT, /DISPUTED_JSON: \[\{"fingerprint":"<fingerprint>","reason":"<why>"\}/);
     for (const field of ["rule", "severity", "file", "evidence"]) {
       assert.ok(STEP_OUTPUT_CONTRACT.includes(field), `contract mentions ${field}`);
     }
