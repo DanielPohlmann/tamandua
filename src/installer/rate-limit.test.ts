@@ -75,11 +75,11 @@ describe("pause and resume", () => {
     assert.deepEqual({ ...row }, { status: "pending", retry_count: 1 });
   });
 
-  it("clears the read-only baseline of a re-queued step so the next claim starts fresh", () => {
-    getDb().prepare("UPDATE steps SET worktree_baseline = '{\"stale\":true}' WHERE id = 's-review'").run();
+  it("keeps the claim-time read-only baseline of a re-queued step so the next claim can enforce it", () => {
+    getDb().prepare("UPDATE steps SET worktree_baseline = '{\"claim\":true}' WHERE id = 's-review'").run();
     requeueClaimedSteps("run-1", "wf_reviewer", "job-1");
     const row = getDb().prepare("SELECT worktree_baseline FROM steps WHERE id = 's-review'").get() as { worktree_baseline: string | null };
-    assert.equal(row.worktree_baseline, null);
+    assert.equal(row.worktree_baseline, '{"claim":true}');
   });
 
   it("never marks a drain-pausing run for auto-resume", () => {

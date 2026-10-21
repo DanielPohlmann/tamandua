@@ -11,7 +11,8 @@ import {
   recordReadOnlyBaseline,
   enforceReadOnly,
 } from "../../dist/installer/read-only.js";
-import { claimStep, completeStep, failStep } from "../../dist/installer/step-ops.js";
+import { claimStep, completeStep, failStep, recoverOrphanedStepsForAgent, cleanupAbandonedSteps } from "../../dist/installer/step-ops.js";
+import { requeueClaimedSteps } from "../../dist/installer/rate-limit.js";
 import { listFindings } from "../../dist/installer/findings.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
@@ -423,5 +424,54 @@ describe("read-only enforcement through the step lifecycle", () => {
     fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
     const result = await failStep(claim.stepId!, "gave up");
     assert.equal(result.status, "blocked");
+  });
+
+  const stepState = () =>
+    getDb().prepare("SELECT status, worktree_baseline FROM steps WHERE id = 's-review'").get() as { status: string; worktree_baseline: string | null };
+
+  const interruptions: Array<[string, () => void]> = [
+    ["a rate-limit re-queue", () => { requeueClaimedSteps("run-1", "wf_reviewer", "job-1"); }],
+    ["orphan recovery", () => { recoverOrphanedStepsForAgent("wf_reviewer", "run-1"); }],
+    ["abandoned-step cleanup", () => {
+      getDb().prepare("UPDATE steps SET updated_at = datetime('now', '-2 days') WHERE id = 's-review'").run();
+      cleanupAbandonedSteps();
+    }],
+  ];
+
+  for (const [name, interrupt] of interruptions) {
+    it(`blocks the next claim when the verifier wrote before ${name}`, () => {
+      assert.equal(claimStep("wf_reviewer", "run-1").found, true);
+      fs.writeFileSync(path.join(repo, "sneaky.txt"), "x\n");
+      interrupt();
+      assert.equal(stepState().status, "pending");
+
+      assert.equal(claimStep("wf_reviewer", "run-1").found, false);
+      const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+      assert.equal(run.status, "blocked");
+      const [finding] = listFindings("run-1");
+      assert.equal(finding.rule, "gate/read-only-violation");
+      assert.equal(fs.existsSync(path.join(repo, "sneaky.txt")), false);
+      const quarantined = path.join(repo, ".git", "tamandua-quarantine", "run-1", "s-review", "sneaky.txt");
+      assert.equal(fs.readFileSync(quarantined, "utf-8"), "x\n");
+    });
+  }
+
+  it("forgets the baseline once enforced so a later re-claim never re-checks other steps' changes", () => {
+    const claim = claimStep("wf_reviewer", "run-1");
+    assert.equal(completeStep(claim.stepId!, "STATUS: done").status !== "blocked", true);
+    assert.equal(stepState().worktree_baseline, null);
+  });
+
+  it("claims normally after a clean re-queue and records a fresh baseline", () => {
+    assert.equal(claimStep("wf_reviewer", "run-1").found, true);
+    requeueClaimedSteps("run-1", "wf_reviewer", "job-1");
+    assert.ok(stepState().worktree_baseline);
+
+    assert.equal(claimStep("wf_reviewer", "run-1").found, true);
+    assert.equal(stepState().status, "running");
+    assert.ok(stepState().worktree_baseline);
+    assert.equal(listFindings("run-1").length, 0);
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "running");
   });
 });

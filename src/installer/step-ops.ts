@@ -872,6 +872,7 @@ interface ClaimResult {
  * Throttle cleanupAbandonedSteps: run at most once every 5 minutes.
  */
 let lastCleanupTime = 0;
+const INTERRUPTED_RUN_OUTPUT = "<re-claim after interrupted run>";
 const CLEANUP_THROTTLE_MS = 5 * 60 * 1000;
 
 /**
@@ -896,7 +897,8 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   // Run-scoped claim: concurrent runs of the same workflow + agent never
   // cross-claim because the WHERE clause pins to a specific run_id.
   const step = db.prepare(
-    `SELECT s.id, s.step_id, s.run_id, s.input_template, s.type, s.loop_config, s.step_index, s.retry_count, s.output
+    `SELECT s.id, s.step_id, s.run_id, s.input_template, s.type, s.loop_config, s.step_index, s.retry_count, s.output,
+            s.agent_role, s.worktree_baseline, s.fix_rounds
      FROM steps s
      JOIN runs r ON r.id = s.run_id
      WHERE s.agent_id = ? AND s.run_id = ? AND s.status = 'pending'
@@ -922,6 +924,9 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
     step_index: number;
     retry_count: number;
     output: string | null;
+    agent_role: string | null;
+    worktree_baseline: string | null;
+    fix_rounds: number;
   } | undefined;
 
   if (!step) return { found: false };
@@ -929,6 +934,12 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   // Guard: don't claim work for a terminal/paused run
   const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
   if (runStatus?.status !== "running") return { found: false };
+
+  // A baseline that survived to a re-claim means the previous attempt was interrupted
+  // (re-queue, timeout, orphan, abandon) before its writes were checked.
+  if (step.worktree_baseline !== null && enforceReadOnly(step, INTERRUPTED_RUN_OUTPUT)) {
+    return { found: false };
+  }
 
   const budget = db.prepare("SELECT tokens_spent, max_tokens FROM runs WHERE id = ?").get(step.run_id) as
     { tokens_spent: number; max_tokens: number | null };

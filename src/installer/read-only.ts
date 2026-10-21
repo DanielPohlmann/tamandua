@@ -412,13 +412,7 @@ export function enforceReadOnly(
       ...(result.failures.length ? ["Could not restore:", ...result.failures] : []),
     ], output);
   } finally {
+    getDb().prepare("UPDATE steps SET worktree_baseline = NULL WHERE id = ?").run(step.id);
     if (!keepRef) dropBaselineRef(worktree, step.id);
   }
-}
-
-/** Forgets a step's baseline so a re-queued step never inherits a stale one. */
-export function clearReadOnlyBaseline(stepDbId: string, runId: string): void {
-  getDb().prepare("UPDATE steps SET worktree_baseline = NULL WHERE id = ?").run(stepDbId);
-  const worktree = worktreeOf(runId);
-  if (worktree) dropBaselineRef(worktree, stepDbId);
 }

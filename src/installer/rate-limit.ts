@@ -1,6 +1,5 @@
 import { getDb, inTransaction } from "../db.js";
 import { emitEvent } from "./events.js";
-import { clearReadOnlyBaseline } from "./read-only.js";
 
 const RESET_AT = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([AP]M)/i;
 const EPOCH_SUFFIX = /\|\s*(\d{9,11})\b/;
@@ -80,7 +79,6 @@ export function requeueClaimedSteps(runId: string, agentId: string, jobId: strin
         db.prepare("UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(step.current_story_id);
       }
       db.prepare("UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?").run(step.id);
-      clearReadOnlyBaseline(step.id, runId);
       requeued++;
     }
     return requeued;
