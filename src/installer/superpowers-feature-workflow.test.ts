@@ -59,6 +59,15 @@ describe("superpowers-feature workflow", async () => {
     assert.match(step("gate-e2e").input, /\{\{feature_complete\}\}/);
   });
 
+  it("lets the per-plan verifier send the story back to implement", () => {
+    const verify = step("verify");
+    const accepts = (output: string) => validateExpects(output, verify.expects!) === null;
+    assert.ok(accepts("STATUS: done\nVERIFIED: ok"));
+    assert.ok(accepts("STATUS: retry\nISSUES:\n- missing test file"));
+    assert.ok(!accepts("STATUS: failed\nREASON: x"));
+    assert.match(step("implement").input, /\{\{verify_feedback\}\}/);
+  });
+
   it("gives code changes only to the developer through fix", () => {
     assert.equal(step("fix").agent, "developer");
     assert.equal(role("developer"), "coding");

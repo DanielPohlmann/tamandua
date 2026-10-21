@@ -316,7 +316,7 @@ steps:
       STATUS: retry
       ISSUES:
       - what is missing (e.g. missing test file, failing test, unrealized File Map entry)
-    expects: "STATUS: done"
+    expects: "regex:^STATUS: (done|retry)$"
     on_fail:
       # retry_step is informational; per-story retries are engine-fixed at 4.
       # (on_fail.max_retries is not read by the runtime — deliberately omitted.)

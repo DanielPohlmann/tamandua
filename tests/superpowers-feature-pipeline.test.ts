@@ -57,6 +57,7 @@ interface Harness {
   runId: string;
   repo: string;
   log: string;
+  inputs: string;
   workflow: WorkflowSpec;
 }
 
@@ -94,6 +95,8 @@ async function startRun(
   fs.copyFileSync(path.join(FIXTURES, "fake-claude.cjs"), bin);
   const log = path.join(home.dir, "prompts.jsonl");
   fs.writeFileSync(log, "");
+  const inputs = path.join(home.dir, "inputs.jsonl");
+  fs.writeFileSync(inputs, "");
   fs.writeFileSync(path.join(home.dir, "script.json"), JSON.stringify(replies));
   fs.writeFileSync(path.join(home.dir, "gates.json"), JSON.stringify(gateExits));
   Object.assign(process.env, {
@@ -101,6 +104,7 @@ async function startRun(
     FAKE_CLAUDE_SCRIPT: path.join(home.dir, "script.json"),
     FAKE_CLAUDE_STATE: path.join(home.dir, "state.json"),
     FAKE_CLAUDE_LOG: log,
+    FAKE_CLAUDE_INPUTS: inputs,
     FAKE_TAMANDUA_CLI_JS: path.join(ROOT, "dist", "cli", "cli.js"),
     FAKE_GATES_STATE: path.join(home.dir, "gates.json"),
     // Every fake round spawns the tamandua CLI up to three times; caching compiled modules keeps that bearable.
@@ -125,7 +129,7 @@ async function startRun(
   ).run(runId, WORKFLOW_ID, context.task, JSON.stringify(context), workflow.budgets?.max_fix_rounds ?? 8, now, now);
   insertRunSteps(workflow, runId, now);
   advancePipeline(runId);
-  return { runId, repo, log, workflow };
+  return { runId, repo, log, inputs, workflow };
 }
 
 function runStatus(runId: string): string {
@@ -189,6 +193,13 @@ function invocationFor(log: string, agentShortId: string): LoggedInvocation {
   const found = invocations(log).find((p) => p.prompt.includes(`step peek "${WORKFLOW_ID}_${agentShortId}"`));
   assert.ok(found, `claude was invoked for ${agentShortId}`);
   return found;
+}
+
+function claimedInputs(inputs: string, agentShortId: string): string[] {
+  return fs.readFileSync(inputs, "utf-8").trim().split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { agent: string; input: string })
+    .filter((entry) => entry.agent === agentShortId)
+    .map((entry) => entry.input);
 }
 
 function filesUnder(dir: string): string[] {
@@ -323,15 +334,20 @@ describe("superpowers-feature pipeline with a fake claude", { timeout: 2_400_000
     assert.equal(stepStatus(h.runId, "gate-e2e-checks"), "pending");
   });
 
-  it("blocks a bash gate that keeps failing after max_rounds fix rounds", async () => {
+  it("retries implement with the verifier's issues, then blocks a bash gate that keeps failing after max_rounds fix rounds", async () => {
     const h = await startRun(home, {
       planner: [PLANNER_REPLY],
       setup: [SETUP_REPLY],
-      developer: [IMPLEMENT_REPLY],
-      verifier: [VERIFY_REPLY],
+      developer: [IMPLEMENT_REPLY, IMPLEMENT_REPLY],
+      verifier: ["STATUS: retry\nISSUES:\n- missing unit test for OrderService", VERIFY_REPLY],
     }, { unit: [1, 1, 1, 1] });
 
     await driveTo(h, "blocked");
+    const [firstImplement, secondImplement] = claimedInputs(h.inputs, "developer");
+    assert.doesNotMatch(firstImplement, /missing unit test for OrderService/);
+    assert.match(secondImplement, /missing unit test for OrderService/, "implement receives the verify feedback");
+    assert.ok(getRunEvents(h.runId).some((e) => e.event === "story.retry"));
+    assert.equal(claimedInputs(h.inputs, "verifier").length, 2);
     const context = runContext(h.runId);
     assert.equal(context.blocked_step, "gate-unit");
     assert.match(context.blocked_reason, /after 3 fix round/);

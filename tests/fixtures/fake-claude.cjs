@@ -7,6 +7,7 @@
 //      FAKE_CLAUDE_STATE   JSON counter file (turns consumed per agent)
 //      FAKE_CLAUDE_LOG     JSONL log of { argv, prompt } per invocation
 //      FAKE_TAMANDUA_CLI_JS path of dist/cli/cli.js
+//      FAKE_CLAUDE_INPUTS  optional JSONL log of { agent, stepId, input } per claimed step
 // A reply may contain {{FIRST_FINGERPRINT}}: the first finding fingerprint in the
 // claimed input. An object entry with `git` runs `git <args>` in the harness cwd and
 // one with `write` creates that file there before completing, to act on the worktree.
@@ -37,6 +38,9 @@ const claimed = JSON.parse(tamandua(["step", "claim", agentId, "--run-id", runId
 if (!claimed.stepId) heartbeat();
 
 const shortId = agentId.replace(/^.*?_/, "");
+if (process.env.FAKE_CLAUDE_INPUTS) {
+  fs.appendFileSync(process.env.FAKE_CLAUDE_INPUTS, `${JSON.stringify({ agent: shortId, stepId: claimed.stepId, input: claimed.input })}\n`);
+}
 const script = JSON.parse(fs.readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf-8"));
 const statePath = process.env.FAKE_CLAUDE_STATE;
 const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf-8")) : {};
