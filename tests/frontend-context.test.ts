@@ -14,7 +14,7 @@ describe("computeHasFrontendChanges", () => {
     // Init a git repo with a main branch
     execSync("git init && git checkout -b main", { cwd: tmpDir });
     fs.writeFileSync(path.join(tmpDir, "README.md"), "# test");
-    execSync("git add . && git commit -m 'init'", { cwd: tmpDir });
+    execSync("git add . && git commit -m \"init\"", { cwd: tmpDir });
   });
 
   afterEach(() => {
@@ -24,14 +24,14 @@ describe("computeHasFrontendChanges", () => {
   it("returns 'true' when branch has frontend file changes", () => {
     execSync("git checkout -b feat-ui", { cwd: tmpDir });
     fs.writeFileSync(path.join(tmpDir, "index.html"), "<html></html>");
-    execSync("git add . && git commit -m 'add html'", { cwd: tmpDir });
+    execSync("git add . && git commit -m \"add html\"", { cwd: tmpDir });
     assert.equal(computeHasFrontendChanges(tmpDir, "feat-ui"), "true");
   });
 
   it("returns 'false' when branch has no frontend file changes", () => {
     execSync("git checkout -b feat-backend", { cwd: tmpDir });
     fs.writeFileSync(path.join(tmpDir, "server.ts"), "console.log('hi')");
-    execSync("git add . && git commit -m 'add ts'", { cwd: tmpDir });
+    execSync("git add . && git commit -m \"add ts\"", { cwd: tmpDir });
     assert.equal(computeHasFrontendChanges(tmpDir, "feat-backend"), "false");
   });
 
@@ -47,8 +47,19 @@ describe("computeHasFrontendChanges", () => {
     execSync("git checkout -b feat-styles", { cwd: tmpDir });
     fs.mkdirSync(path.join(tmpDir, "styles"), { recursive: true });
     fs.writeFileSync(path.join(tmpDir, "styles", "main.css"), "body {}");
-    execSync("git add . && git commit -m 'add css'", { cwd: tmpDir });
+    execSync("git add . && git commit -m \"add css\"", { cwd: tmpDir });
     assert.equal(computeHasFrontendChanges(tmpDir, "feat-styles"), "true");
+  });
+
+  it("diffs against the given base branch instead of main", () => {
+    execSync("git checkout -b develop", { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, "index.html"), "<html></html>");
+    execSync("git add . && git commit -m \"html on develop\"", { cwd: tmpDir });
+    execSync("git checkout -b feat-api", { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, "server.ts"), "console.log('hi')");
+    execSync("git add . && git commit -m \"add ts\"", { cwd: tmpDir });
+    assert.equal(computeHasFrontendChanges(tmpDir, "feat-api", "develop"), "false");
+    assert.equal(computeHasFrontendChanges(tmpDir, "feat-api"), "true", "main stays the default base");
   });
 
 });

@@ -790,14 +790,15 @@ export function recoverOrphanedStepsForAgent(
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * Compute whether a branch has frontend changes relative to main.
+ * Compute whether a branch has frontend changes relative to its base branch.
  * Returns 'true' or 'false' as a string for template context.
  */
-export function computeHasFrontendChanges(repo: string, branch: string): string {
+export function computeHasFrontendChanges(repo: string, branch: string, baseBranch = "main"): string {
   try {
-    const output = execFileSync("git", ["diff", "--name-only", `main..${branch}`], {
+    const output = execFileSync("git", ["diff", "--name-only", `${baseBranch}..${branch}`], {
       cwd: repo,
       encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
       timeout: 10_000,
     });
     const files = output.trim().split("\n").filter((f) => f.length > 0);
@@ -973,7 +974,7 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
 
   // Compute has_frontend_changes from git diff when repo and branch are available
   if (context["repo"] && context["branch"]) {
-    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"]);
+    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"], context["base_branch"] || undefined);
   } else {
     context["has_frontend_changes"] = "false";
   }
@@ -2056,7 +2057,7 @@ export function resolveStepContext(
 
   // Add branch info and PR detection context (extracted from previous step outputs)
   if (context["repo"] && context["branch"]) {
-    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"]);
+    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"], context["base_branch"] || undefined);
   }
 
   // Add PR info if available from context
