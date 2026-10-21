@@ -188,11 +188,31 @@ export function findHermesBinary(): string {
 
 // ── claude binary discovery ───────────────────────────────────────
 
+const NODE_SCRIPT_EXTENSIONS = new Set([".js", ".cjs", ".mjs"]);
+
+function isNodeScript(binary: string): boolean {
+  return NODE_SCRIPT_EXTENSIONS.has(path.extname(binary).toLowerCase());
+}
+
+/**
+ * Node scripts (e.g. a fake claude used in tests) cannot be exec'd directly on
+ * every platform, so they are launched through the current node executable.
+ */
+export function resolveClaudeCommand(
+  binary: string,
+  args: string[],
+): { command: string; args: string[] } {
+  if (isNodeScript(binary)) {
+    return { command: process.execPath, args: [binary, ...args] };
+  }
+  return { command: binary, args };
+}
+
 export function findClaudeBinary(): string {
   const envClaude = process.env.TAMANDUA_CLAUDE_BINARY?.trim();
   if (envClaude) {
     try {
-      fs.accessSync(envClaude, fs.constants.X_OK);
+      fs.accessSync(envClaude, isNodeScript(envClaude) ? fs.constants.R_OK : fs.constants.X_OK);
       return envClaude;
     } catch {
       throw new Error(
@@ -692,7 +712,8 @@ export async function runClaude(
     workdir: options.workdir,
   });
 
-  const child = spawn(claudePath, args, {
+  const launch = resolveClaudeCommand(claudePath, args);
+  const child = spawn(launch.command, launch.args, {
     cwd: options.workdir ?? process.cwd(),
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
@@ -869,6 +890,15 @@ async function buildAgentPersonaInstructions(agentId: string): Promise<string> {
   ].join("\n\n");
 }
 
+export const STEP_OUTPUT_CONTRACT = [
+  `─── STEP OUTPUT CONTRACT ───`,
+  `- The text you pipe to "step complete" starts with a first line "STATUS: done|retry|blocked", using the value your instructions allow. A gate that found problems completes with STATUS: retry; STATUS: blocked also needs a "REASON: <why>" line.`,
+  `- Every other field is its own "KEY: value" line with an UPPER_SNAKE_CASE key (e.g. CHANGES:, PR:, REVIEWED_SHA:). These lines are merged into the run context; keys the engine reserves for itself are ignored.`,
+  `- JSON fields are a single line of valid JSON right after the key, with no prose after it on that line: FINDINGS_JSON: [...] for gates, RESOLVED: [...] and DISPUTED_JSON: [...] for fix steps (also STORIES_JSON when your instructions ask for it).`,
+  `- Each finding is an object with rule, severity (blocking|major|minor), file and evidence.`,
+  `- Use "step fail" only when you could not do the work at all.`,
+].join("\n");
+
 /**
  * Build the prompt an agent gets to check for and execute work.
  *
@@ -886,14 +916,14 @@ export function buildAgentPrompt(workflowId: string, agentId: string, runId: str
     `Your job is to poll for work and execute it.`,
     ``,
     `STEP 1 — Check for pending work:`,
-    `Run: node "${cli}" step peek "${agentId}" --run-id "${runId}"`,
+    `Run: "${cli}" step peek "${agentId}" --run-id "${runId}"`,
     ``,
     `STEP 2 — If NO_WORK:`,
     `Reply HEARTBEAT_OK and stop. Do NOT do anything else.`,
     ``,
     `STEP 3 — If HAS_WORK:`,
     `Claim the step and capture the JSON response:`,
-    `Run: node "${cli}" step claim "${agentId}" --run-id "${runId}"`,
+    `Run: "${cli}" step claim "${agentId}" --run-id "${runId}"`,
     `The output will be JSON: {"stepId":"<UUID>", "runId":"<UUID>", "input":"<task description>"}`,
     `SAVE the stepId — you MUST use it in step 4.`,
     ``,
@@ -903,8 +933,8 @@ export function buildAgentPrompt(workflowId: string, agentId: string, runId: str
     `STEP 4 — Report results using the SAVED stepId (NOT the agent ID):`,
     `On success: echo 'STATUS: done
 CHANGES: <what you changed>
-TESTS: <tests you ran>' | node "${cli}" step complete "<stepId>"`,
-    `On failure: node "${cli}" step fail "<stepId>" "<clear reason>"`,
+TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
+    `On failure: "${cli}" step fail "<stepId>" "<clear reason>"`,
     ``,
     `CRITICAL: You MUST report results using the step complete or step fail commands.`,
     `Failing to report will leave the workflow stuck forever. Always report, even if you`,
@@ -931,8 +961,8 @@ export function buildWorkPrompt(workflowId: string, agentId: string, runId: stri
     `When done, report your results using the SAVED stepId (NOT the agent ID):`,
     `On success: echo 'STATUS: done
 CHANGES: <what you changed>
-TESTS: <tests you ran>' | node "${cli}" step complete "<stepId>"`,
-    `On failure: node "${cli}" step fail "<stepId>" "<reason>"`,
+TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
+    `On failure: "${cli}" step fail "<stepId>" "<reason>"`,
     ``,
     `CRITICAL: You MUST report results. Do not exit without calling step complete or step fail.`,
   ].join("\n");
@@ -974,7 +1004,7 @@ export function buildPollingPrompt(
     ``,
     `─── PHASE 1: PEEK ───`,
     `Run this exact command and capture its output:`,
-    `node "${cli}" step peek "${agentId}" --run-id "${runId}"`,
+    `"${cli}" step peek "${agentId}" --run-id "${runId}"`,
     ``,
     `If the output contains NO_WORK:`,
     `  Reply exactly: HEARTBEAT_OK`,
@@ -985,7 +1015,7 @@ export function buildPollingPrompt(
     ``,
     `─── PHASE 2: CLAIM AND EXECUTE ───`,
     `1. Claim the step and capture the JSON response:`,
-    `   node "${cli}" step claim "${agentId}" --run-id "${runId}"`,
+    `   "${cli}" step claim "${agentId}" --run-id "${runId}"`,
     `   The output is JSON: {"stepId":"<UUID>", "runId":"<UUID>", "input":"<task description>"}`,
     `   SAVE the stepId — you MUST use it when reporting results.`,
     ``,
@@ -996,8 +1026,10 @@ export function buildPollingPrompt(
     `4. When finished, report using the SAVED stepId (NOT the agent ID):`,
     `   - Success: echo 'STATUS: done
 CHANGES: <what you did>
-TESTS: <tests you ran>' | node "${cli}" step complete "<stepId>"`,
-    `   - Failure: node "${cli}" step fail "<stepId>" "<clear reason for failure>"`,
+TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
+    `   - Failure: "${cli}" step fail "<stepId>" "<clear reason for failure>"`,
+    ``,
+    STEP_OUTPUT_CONTRACT,
     ``,
     `─── RULES ───`,
     `- ALWAYS report results. Never exit without calling step complete or step fail.`,
