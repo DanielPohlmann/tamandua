@@ -834,13 +834,25 @@ export function recoverOrphanedStepsForAgent(
  * Returns 'true' or 'false' as a string for template context.
  */
 export function computeHasFrontendChanges(repo: string, branch: string, baseBranch = "main"): string {
+  const git = (args: string[]) => execFileSync("git", args, {
+    cwd: repo,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 10_000,
+  });
+  const refExists = (ref: string) => {
+    try {
+      git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   try {
-    const output = execFileSync("git", ["diff", "--name-only", `${baseBranch}..${branch}`], {
-      cwd: repo,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 10_000,
-    });
+    // A worktree often has only the remote-tracking ref of the base branch.
+    const base = refExists(baseBranch) ? baseBranch : `origin/${baseBranch}`;
+    // Three dots: only what the branch changed since it forked, not what landed on the base since.
+    const output = git(["diff", "--name-only", `${base}...${branch}`]);
     const files = output.trim().split("\n").filter((f) => f.length > 0);
     return isFrontendChange(files) ? "true" : "false";
   } catch {

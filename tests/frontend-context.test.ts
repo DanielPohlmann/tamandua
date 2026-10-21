@@ -62,6 +62,24 @@ describe("computeHasFrontendChanges", () => {
     assert.equal(computeHasFrontendChanges(tmpDir, "feat-api"), "true", "main stays the default base");
   });
 
+  it("diffs from the merge-base, ignoring frontend changes that landed on the base after the fork", () => {
+    execSync("git checkout -b feat-api", { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, "server.ts"), "console.log('hi')");
+    execSync("git add . && git commit -m \"add ts\"", { cwd: tmpDir });
+    execSync("git checkout main", { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, "index.html"), "<html></html>");
+    execSync("git add . && git commit -m \"html on main\"", { cwd: tmpDir });
+    assert.equal(computeHasFrontendChanges(tmpDir, "feat-api", "main"), "false");
+  });
+
+  it("falls back to origin/<base> when the local base branch is missing", () => {
+    execSync("git update-ref refs/remotes/origin/develop main", { cwd: tmpDir });
+    execSync("git checkout -b feat-ui", { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, "index.html"), "<html></html>");
+    execSync("git add . && git commit -m \"add html\"", { cwd: tmpDir });
+    assert.equal(computeHasFrontendChanges(tmpDir, "feat-ui", "develop"), "true");
+  });
+
 });
 
 describe("claimStep has_frontend_changes integration", () => {
