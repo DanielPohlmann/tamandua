@@ -14,6 +14,8 @@ import {
 import { claimStep, completeStep, failStep, recoverOrphanedStepsForAgent, cleanupAbandonedSteps } from "../../dist/installer/step-ops.js";
 import { requeueClaimedSteps } from "../../dist/installer/rate-limit.js";
 import { listFindings } from "../../dist/installer/findings.js";
+import { getRunEvents } from "../../dist/installer/events.js";
+import { prepareBlockedRunResume } from "../../dist/installer/gate-loop.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
 function initRepo(dir: string): void {
@@ -424,6 +426,36 @@ describe("read-only enforcement through the step lifecycle", () => {
     fs.writeFileSync(path.join(repo, "tracked.txt"), "edited\n");
     const result = await failStep(claim.stepId!, "gave up");
     assert.equal(result.status, "blocked");
+  });
+
+  it("records one finding and one run.blocked for a duplicate complete/fail after a violation", async () => {
+    const claim = claimStep("wf_reviewer", "run-1");
+    fs.writeFileSync(path.join(repo, "sneaky.txt"), "x\n");
+    assert.equal(completeStep(claim.stepId!, "STATUS: done").status, "blocked");
+    fs.writeFileSync(path.join(repo, "sneaky.txt"), "again\n");
+    completeStep(claim.stepId!, "STATUS: done");
+    await failStep(claim.stepId!, "duplicate");
+    assert.equal(listFindings("run-1").length, 1);
+    assert.equal(getRunEvents("run-1").filter((e) => e.event === "run.blocked").length, 1);
+    const run = getDb().prepare("SELECT status FROM runs WHERE id = 'run-1'").get() as { status: string };
+    assert.equal(run.status, "blocked");
+  });
+
+  it("returns a loop step's story to pending on a violation so the resumed run claims it again", () => {
+    const db = getDb();
+    db.prepare("UPDATE steps SET type = 'loop', loop_config = ? WHERE id = 's-review'").run(JSON.stringify({ over: "stories", completion: "all_done" }));
+    db.prepare(
+      "INSERT INTO stories (id, run_id, story_index, story_id, title, description, acceptance_criteria, status, retry_count, max_retries, created_at, updated_at) VALUES ('st-1', 'run-1', 0, 'US-1', 't', 'd', '[]', 'pending', 0, 4, datetime('now'), datetime('now'))",
+    ).run();
+    const claim = claimStep("wf_reviewer", "run-1");
+    fs.writeFileSync(path.join(repo, "loop-sneaky.txt"), "x\n");
+    assert.equal(completeStep(claim.stepId!, "STATUS: done").status, "blocked");
+    assert.equal((db.prepare("SELECT status FROM stories WHERE id = 'st-1'").get() as { status: string }).status, "pending");
+
+    prepareBlockedRunResume("run-1");
+    assert.equal(claimStep("wf_reviewer", "run-1").found, true);
+    const step = db.prepare("SELECT current_story_id FROM steps WHERE id = 's-review'").get() as { current_story_id: string | null };
+    assert.equal(step.current_story_id, "st-1");
   });
 
   const stepState = () =>

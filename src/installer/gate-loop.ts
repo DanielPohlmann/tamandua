@@ -126,6 +126,12 @@ function toFixFeedback(findings: StoredFinding[]): string {
   })));
 }
 
+function existingBlockedReason(runId: string): string | undefined {
+  const row = getDb().prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string } | undefined;
+  return row ? (JSON.parse(row.context) as Record<string, string>).blocked_reason : undefined;
+}
+
+/** Blocks a running or paused run at a step; a run already blocked or finished is left as it is. */
 export function blockRunAtStep(params: {
   runId: string;
   stepDbId: string;
@@ -134,12 +140,21 @@ export function blockRunAtStep(params: {
   output: string;
 }): { status: "blocked"; detail: string } {
   const db = getDb();
-  inTransaction(() => {
-    db.prepare("UPDATE steps SET status = 'waiting', output = ?, updated_at = datetime('now') WHERE id = ?")
+  const blocked = inTransaction(() => {
+    const run = db.prepare("UPDATE runs SET status = 'blocked', updated_at = datetime('now') WHERE id = ? AND status IN ('running', 'paused')")
+      .run(params.runId);
+    if (Number(run.changes) !== 1) return false;
+    const step = db.prepare("SELECT current_story_id FROM steps WHERE id = ?").get(params.stepDbId) as
+      { current_story_id: string | null } | undefined;
+    if (step?.current_story_id) {
+      db.prepare("UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(step.current_story_id);
+    }
+    db.prepare("UPDATE steps SET status = 'waiting', output = ?, current_story_id = NULL, updated_at = datetime('now') WHERE id = ?")
       .run(params.output, params.stepDbId);
     mergeRunContext(params.runId, { blocked_step: params.stepName, blocked_reason: params.reason });
-    db.prepare("UPDATE runs SET status = 'blocked', updated_at = datetime('now') WHERE id = ?").run(params.runId);
+    return true;
   });
+  if (!blocked) return { status: "blocked", detail: existingBlockedReason(params.runId) ?? params.reason };
   emitEvent({
     ts: new Date().toISOString(),
     event: "run.blocked",

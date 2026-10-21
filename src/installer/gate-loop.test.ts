@@ -9,7 +9,9 @@ import {
   prepareBlockedRunResume,
   bashOutputContextKey,
   tailLines,
+  blockRunAtStep,
 } from "../../dist/installer/gate-loop.js";
+import { getRunEvents } from "../../dist/installer/events.js";
 import { listFindings } from "../../dist/installer/findings.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
@@ -224,5 +226,43 @@ describe("atomic transitions", () => {
       /no step "ghost"/,
     );
     assert.equal(stepRow("fix").status, "waiting");
+  });
+});
+
+describe("blockRunAtStep", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-block-run-");
+    seedRun(getDb(), { id: "run-1" }, [
+      { id: "s-loop", stepId: "implement", index: 0, status: "running", type: "loop" },
+    ]);
+    getDb().prepare(
+      "INSERT INTO stories (id, run_id, story_index, story_id, title, description, acceptance_criteria, status, retry_count, max_retries, created_at, updated_at) VALUES ('st-1', 'run-1', 0, 'US-1', 't', 'd', '[]', 'running', 0, 4, datetime('now'), datetime('now'))",
+    ).run();
+    getDb().prepare("UPDATE steps SET current_story_id = 'st-1' WHERE id = 's-loop'").run();
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  const block = () => blockRunAtStep({ runId: "run-1", stepDbId: "s-loop", stepName: "implement", reason: "stop", output: "out" });
+
+  it("hands the in-flight story back to pending so a resume claims it again", () => {
+    block();
+    const story = getDb().prepare("SELECT status FROM stories WHERE id = 'st-1'").get() as { status: string };
+    const step = getDb().prepare("SELECT status, current_story_id FROM steps WHERE id = 's-loop'").get() as { status: string; current_story_id: string | null };
+    assert.equal(story.status, "pending");
+    assert.deepEqual({ ...step }, { status: "waiting", current_story_id: null });
+  });
+
+  it("blocks once: a second block of the same run emits no second run.blocked", () => {
+    assert.equal(block().status, "blocked");
+    assert.equal(block().status, "blocked");
+    assert.equal(getRunEvents("run-1").filter((e) => e.event === "run.blocked").length, 1);
+  });
+
+  it("never blocks a run that already finished", () => {
+    getDb().prepare("UPDATE runs SET status = 'failed' WHERE id = 'run-1'").run();
+    block();
+    assert.equal(runRow().status, "failed");
+    assert.equal(getRunEvents("run-1").some((e) => e.event === "run.blocked"), false);
   });
 });
