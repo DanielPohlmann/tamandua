@@ -1,3 +1,5 @@
+import { isEngineOwnedContextKey } from "../installer/step-ops.js";
+
 export interface WorkflowRunArgs {
   taskTitle: string;
   workingDirectoryForHarness?: string;
@@ -158,6 +160,9 @@ function addContextPair(context: Record<string, string>, pair: string): void {
   const key = pair.slice(0, separator).trim();
   if (!CONTEXT_KEY.test(key)) {
     throw new Error(`--context key must match ${CONTEXT_KEY} (lowercase snake_case), got "${key}".`);
+  }
+  if (isEngineOwnedContextKey(key)) {
+    throw new Error(`--context key "${key}" is owned by the engine and cannot be set from the command line.`);
   }
   context[key] = pair.slice(separator + 1);
 }

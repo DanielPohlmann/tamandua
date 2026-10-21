@@ -76,6 +76,18 @@ describe("parseWorkflowRunArgs", () => {
     assert.throws(() => parseWorkflowRunArgs(["--context", "bad-key=x", "task"]), /--context key must match/);
   });
 
+  it("rejects --context keys the engine owns", () => {
+    for (const key of [
+      "task", "repo", "run_id", "workspace_mode", "worktree_origin_ref", "fix_feedback", "fix_origin",
+      "findings_gate_review", "minor_findings", "gate_unit_output", "blocked_step", "blocked_reason",
+      "rate_limit_resume_at", "rate_limit_pauses", "__env_keys",
+    ]) {
+      assert.throws(() => parseWorkflowRunArgs(["--context", `${key}=x`, "task"]), /--context/, key);
+    }
+    assert.throws(() => parseWorkflowRunArgs(["--context", "fix_feedback=x", "task"]), /"fix_feedback" is owned by the engine/);
+    assert.deepEqual(parseWorkflowRunArgs(["--context", "reviewed_sha=abc", "task"]).context, { reviewed_sha: "abc" });
+  });
+
   it("parses --no-hurry-please-save-tokens-mode as a boolean flag", () => {
     const result = parseWorkflowRunArgs([
       "--no-hurry-please-save-tokens-mode",

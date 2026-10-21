@@ -91,6 +91,17 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "blocked_reason",
 ]);
 
+/** Gate-loop state the engine seeds and rewrites itself (see buildEngineContextDefaults). */
+const GATE_LOOP_CONTEXT_KEYS = new Set(["fix_feedback", "fix_origin", "minor_findings"]);
+
+/** Keys a caller must not seed through `--context`: the engine sets or rewrites them during the run. */
+export function isEngineOwnedContextKey(key: string): boolean {
+  return RESERVED_CONTEXT_KEYS.has(key)
+    || GATE_LOOP_CONTEXT_KEYS.has(key)
+    || key.startsWith("findings_")
+    || key.endsWith("_output");
+}
+
 /** Gate env inputs the plan step sets once; later step output cannot rewrite them. */
 const WRITE_ONCE_CONTEXT_KEYS = new Set(["branch", "feature_complete"]);
 /** Declared context keys a step legitimately updates (the review verifier records what it reviewed). */
