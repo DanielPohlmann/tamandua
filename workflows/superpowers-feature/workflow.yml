@@ -1,50 +1,59 @@
-# Superpowers feature pipeline — plan-driven.
+# Superpowers feature pipeline — plan-driven, verifier-gated, PR at the end.
 #
-# Product + spec + plans are produced REMOTELY by a human using the project skills
-# and land in docs/superpowers/specs/ + docs/superpowers/plans/. This workflow does
-# NOT re-plan: step 1 loads the approved spec (or plan set) and enumerates the plan
-# files as stories, one story per plan, ordered by their Prerequisites. Each plan is
-# then driven by superpowers:executing-plans (TDD, tests written alongside).
-# Flow: load -> implement (executing-plans per plan) <-> per-plan verify ->
-# E2E (conditional) -> review -> security (hard gate) -> local CI gate -> PR (never merges).
+# Spec + plans are authored and approved by a human (docs/superpowers/). This
+# workflow does NOT re-plan: load-plan turns the plan files into ordered stories,
+# implement drives each plan with superpowers:executing-plans (TDD) and verify
+# checks each plan. Then deterministic gates run cheapest-first:
 #
-# Recommended run (worktree-isolated, PR against develop, never merges).
-# Pass a SPEC path (planner resolves its plans) or explicit plan path(s):
+#   unit, then security (checks + verifier), review (checks + verifier),
+#   e2e (checks + verifier), ci-local, and finally pr
+#
+# Gate commands live in the TARGET repository (scripts/gates/*.mjs); a non-zero
+# exit fails the gate. Verifier agents are read-only: they only report
+# FINDINGS_JSON. Any failing gate hands its open blocking/major findings to the
+# `fix` step (the developer — the only agent that changes code), then the same
+# gate runs again. Budgets: 3 fix rounds per gate, 8 per run; exhausting one, or a
+# disputed finding raised again, BLOCKS the run for a human.
+#
+# Run (worktree-isolated, PR against develop, never merges):
 #   tamandua workflow run superpowers-feature "docs/superpowers/specs/<feature>-design.md" \
 #     --worktree-origin-repository <path-to-your-repo> \
 #     --worktree-origin-ref develop
-#
 # Override the PR/base branch per run with: --context base_branch=main
-# Requires a GitHub remote + authenticated `gh` CLI for the pr step.
+# --worktree-origin-ref and --context base_branch= must name the same branch:
+# the worktree starts from the origin ref, while gates and the PR diff against base_branch.
+# Inspect: tamandua workflow status <run> --json | tamandua workflow findings <run>
+# Unblock: tamandua workflow resume <run> [--max-rounds n] [--max-fix-rounds n] [--max-tokens n]
 #
-# Engine note: Tamandua steps are sequential and there is no cross-step goto
-# (retry_step is informational). The only true feedback loop is implement<->verify
-# per story. The e2e/review/security/ci-local steps are therefore write-capable
-# gates that FIX findings within the step (bounded by max_retries) and escalate to
-# a human only when a fix would require a product decision.
+# Requires: scripts/gates/{unit,security-checks,review-checks,e2e-checks,ci-local}.mjs
+# in the target repo, a GitHub remote and an authenticated `gh` CLI.
 id: superpowers-feature
-name: Superpowers Feature (plan-driven, PR)
-version: 1
+name: Superpowers Feature (plan-driven, verifier-gated, PR)
+version: 2
 description: |
-  Plan-driven feature pipeline. Loads an approved spec (or plan set)
-  from docs/superpowers/, enumerates its plan files as ordered stories (one per
-  plan), and drives each plan with superpowers:executing-plans under TDD (unit
-  tests written alongside). Verifies each plan, runs E2E (only for complete
-  user-facing features), code review, a hard security gate, the local CI gate,
-  and finally opens a PR against the base branch — it never merges. Every step
-  consults the skills the target project's CLAUDE.md defines for its domain.
+  Plan-driven feature pipeline. Loads an approved spec (or plan set), drives each
+  plan with superpowers:executing-plans under TDD, verifies each plan, then runs
+  deterministic gates (unit, security, review, e2e, local CI) backed by read-only
+  verifier agents. Failing gates loop through a single fix step owned by the
+  developer. Opens a PR against the base branch — it never merges.
+run:
+  workspace: worktree
 polling:
   model: default
   timeoutSeconds: 120
 
 context:
   base_branch: develop   # PR target + review/baseline diff. Override: --context base_branch=main
+  reviewed_sha: ""       # last commit the review verifier reviewed (re-review scope)
+
+budgets:
+  max_fix_rounds: 8
 
 agents:
   - id: planner
     name: Plan Loader
     role: analysis
-    description: Reads the pre-approved plan file and derives ordered stories.
+    description: Reads the pre-approved plan files and derives ordered stories.
     workspace:
       baseDir: agents/planner
       skills:
@@ -62,7 +71,7 @@ agents:
   - id: developer
     name: Developer
     role: coding
-    description: Implements each story with unit tests; runs the CI gate; opens the PR.
+    description: Implements each plan with tests and fixes every gate finding. The only agent that changes code.
     timeoutSeconds: 2400
     workspace:
       baseDir: agents/developer
@@ -72,7 +81,7 @@ agents:
   - id: verifier
     name: Verifier
     role: verification
-    description: Per-story verification against acceptance criteria.
+    description: Per-plan verification against acceptance criteria.
     workspace:
       baseDir: agents/verifier
       skills:
@@ -83,37 +92,46 @@ agents:
         SOUL.md: ../../agents/shared/verifier/SOUL.md
         IDENTITY.md: ../../agents/shared/verifier/IDENTITY.md
 
-  - id: tester
-    name: E2E Tester
-    # role coding, not testing: this is a write-capable gate — it writes missing
-    # E2E tests, fixes real bugs, and commits (the `testing` role is no-write).
-    role: coding
-    description: Whole-app E2E for complete user-facing features.
+  - id: security
+    name: Security Verifier
+    role: verification
+    description: Triages scanner output and reviews the diff for security flaws. Read-only.
     timeoutSeconds: 2400
     workspace:
-      baseDir: agents/tester
+      baseDir: agents/security
       skills:
         - tamandua-agents
 
   - id: reviewer
-    name: Reviewer
-    role: coding
-    description: Code review with in-step adjustments (quality, architecture, conventions).
+    name: Review Verifier
+    role: verification
+    description: Reviews the diff against the repository's review rules. Read-only.
     timeoutSeconds: 2400
     workspace:
       baseDir: agents/reviewer
       skills:
         - tamandua-agents
 
-  - id: security
-    name: Security Gate
-    role: coding
-    description: Hard security gate (OWASP/LGPD) that fixes high/critical findings.
+  - id: tester
+    name: E2E Verifier
+    role: testing
+    description: Walks every acceptance criterion in a real browser. Read-only.
     timeoutSeconds: 2400
     workspace:
-      baseDir: agents/security
+      baseDir: agents/tester
       skills:
         - tamandua-agents
+
+  - id: pr
+    name: PR Publisher
+    role: pr
+    description: Pushes the branch through the pre-push hook and opens the PR. Never merges.
+    timeoutSeconds: 2400
+    workspace:
+      baseDir: agents/pr
+      skills:
+        - tamandua-agents
+
 
 steps:
   - id: load-plan
@@ -185,16 +203,14 @@ steps:
       Instructions:
       1. Ensure you are at the repo root ({{repo}}).
       2. Create the feature branch: git checkout -b {{branch}} (if it already exists, just check it out).
-      3. Read CLAUDE.md and .planning/codebase/STACK.md + TESTING.md to learn the exact build/test commands and project layout.
-      4. Establish a baseline WITHOUT pushing:
-         - Backend: build the solution and identify the unit-test command.
-         - Frontends (frontend/admin-spa, frontend/public-nuxt): identify their commands only if the plan touches them.
-      5. Do NOT run the full lefthook/ci-local here — only enough to confirm the tree builds.
+      3. Read the repository's CLAUDE.md and docs to learn the exact build and test commands and the project layout.
+      4. Establish a baseline WITHOUT pushing: confirm the project builds and identify the unit-test command; identify other commands (e.g. for a frontend) only if the plan touches them.
+      5. Do NOT run the full CI gate here — only enough to confirm the tree builds.
 
       Reply with:
       STATUS: done
-      BUILD_CMD: <backend build command>
-      TEST_CMD: <backend unit-test command>
+      BUILD_CMD: <build command>
+      TEST_CMD: <unit-test command>
       FRONTEND_CMD: <frontend ci/test command, or "n/a">
       BASELINE: <baseline result — does it build/test clean?>
     expects: "STATUS: done"
@@ -294,6 +310,12 @@ steps:
       Has frontend changes: {{has_frontend_changes}}
       If 'true', use the agent-browser skill to render the changed UI and confirm it is not broken (layout, missing elements, unstyled content). If 'false', skip visual checks.
 
+      You are READ-ONLY: never write files in the repository — any change to the worktree blocks the run.
+      Keep screenshots, snapshots, traces and logs in the OS temp dir or a gitignored directory.
+
+      Your STATUS line is the FIRST line of your reply, and it is STATUS: done or STATUS: retry only.
+      This overrides your persona's "last line" and "STATUS: failed" instructions.
+
       Reply with:
       STATUS: done
       VERIFIED: what you confirmed
@@ -302,7 +324,7 @@ steps:
       STATUS: retry
       ISSUES:
       - what is missing (e.g. missing test file, failing test, unrealized File Map entry)
-    expects: "STATUS: done"
+    expects: "regex:^STATUS: (done|retry)$"
     on_fail:
       # retry_step is informational; per-story retries are engine-fixed at 4.
       # (on_fail.max_retries is not read by the runtime — deliberately omitted.)
@@ -310,158 +332,237 @@ steps:
       on_exhausted:
         escalate_to: human
 
-  - id: e2e
-    agent: tester
-    input: |
-      End-to-end verification of the completed feature.
+  - id: gate-unit
+    type: bash
+    run: node scripts/gates/unit.mjs
+    on_fail: { fix_step: fix, max_rounds: 3 }
 
-      FEATURE COMPLETE: {{feature_complete}}
+  - id: gate-security-checks
+    type: bash
+    run: node scripts/gates/security-checks.mjs
+    on_fail: { fix_step: fix, max_rounds: 3 }
 
-      If FEATURE COMPLETE is 'false', this plan does not deliver a complete
-      user-facing feature — SKIP E2E. Reply immediately with:
-      STATUS: done
-      RESULTS: E2E skipped — FEATURE_COMPLETE=false (not a complete user-facing feature).
-
-      If FEATURE COMPLETE is 'true', run the real E2E suite:
-      REPO: {{repo}}
-      BRANCH: {{branch}}
-      CHANGES: {{changes}}
-
-      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
-      {{retry_feedback}}
-
-      Instructions:
-      1. Consult the E2E / functional-testing skill your project's CLAUDE.md defines (it overrides training data) to learn how the suite boots the app and drives a real browser, and follow it exactly.
-      2. Run the E2E suite. If this feature is user-facing and lacks E2E coverage, write happy-path + main error-case tests per the skill (Page Objects, web-first assertions), then run.
-      3. If a test fails due to a real product bug, apply superpowers:systematic-debugging (hypothesize, isolate, verify — no blind retries), FIX the bug (and/or the test if the test itself is wrong), commit following repo conventions, and re-run until green.
-      4. Keep changes scoped to making the feature work end to end.
-
-      Reply with:
-      STATUS: done
-      RESULTS: what you ran/wrote and the outcome
-
-      If you cannot get E2E green after honest effort, end with STATUS: failed and a REASON: line.
-    expects: "STATUS: done"
-    max_retries: 3
-    on_fail:
-      escalate_to: human
-
-  - id: review
-    agent: reviewer
-    input: |
-      Code review WITH in-step adjustments for the branch changes.
-
-      REPO: {{repo}}
-      BRANCH: {{branch}}
-      BASE BRANCH: {{base_branch}}
-      CHANGES: {{changes}}
-
-      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
-      {{retry_feedback}}
-
-      Instructions:
-      1. Review the full diff vs the base branch: git diff origin/{{base_branch}}...HEAD (fall back to {{base_branch}}...HEAD if no remote ref). Use whatever code-review skill your project's CLAUDE.md defines as the standard (it overrides training data).
-      2. Assess: correctness/bugs, Clean Code & SOLID, Clean Architecture layering, DDD boundary adherence (no cross-module type imports, aggregates by id), test coverage, i18n for user-facing strings, living docs updated when the diff warrants it (per the project CLAUDE.md update rules), and the conventions in .planning/codebase.
-      3. For every issue found, FIX it directly, add/adjust tests, and commit (repo conventions). Re-run the affected unit tests.
-      4. Re-review after fixing to confirm the diff is clean. Only pass when it is.
-
-      Reply with:
-      STATUS: done
-      DECISION: approved
-      REVIEW: summary of findings and what you changed
-
-      If issues remain that you cannot responsibly fix because they would require a product decision or contradict the approved plan/spec (do NOT invent product decisions), end with STATUS: failed and a REASON: line describing what a human must decide.
-    expects: "STATUS: done"
-    max_retries: 3
-    on_fail:
-      escalate_to: human
-
-  - id: security
+  - id: gate-security
     agent: security
     input: |
-      HARD security gate for the branch changes. High/critical findings MUST be
-      fixed before the PR opens.
+      Security verification of the branch. You are READ-ONLY: never edit, create,
+      delete or commit files. Report findings; the developer fixes them.
 
       REPO: {{repo}}
       BRANCH: {{branch}}
       BASE BRANCH: {{base_branch}}
-      CHANGES: {{changes}}
+      PLANS: {{plan_set}}
 
-      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
+      SCANNER OUTPUT (gate-security-checks, last 200 lines):
+      {{gate_security_checks_output}}
+
+      FINDINGS YOU RAISED BEFORE (JSON, with status — never re-raise a resolved one unless it is truly back):
+      {{findings_gate_security}}
+
+      RETRY FEEDBACK (only if your previous reply was rejected):
       {{retry_feedback}}
 
       Instructions:
-      1. Use whatever security skills your project's CLAUDE.md defines for this work (they override training data) — covering the OWASP Top 10, input validation, authentication/authorization, data protection, and supply chain. Cover authz/authn, injection, insecure deserialization, SSRF, access control, secrets, and PII handling under LGPD/GDPR.
-      2. Review the diff vs the base branch plus any new endpoints, consumers, queries, and config. Confirm user-facing errors go through localization and leak no internals, and that RabbitMQ messages carry only the fields consumers need.
-      3. FIX every HIGH or CRITICAL finding directly, add regression tests where feasible, and commit (repo conventions). MEDIUM/LOW: fix if cheap, otherwise document them.
-      4. Re-check after fixing. Only pass when no HIGH/CRITICAL remains.
+      1. Read the diff: git diff origin/{{base_branch}}...HEAD (fall back to {{base_branch}}...HEAD).
+      2. Triage the scanner output: drop false positives (say why in your summary), keep real ones as findings.
+      3. Look for what scanners miss, using the security skills your project's CLAUDE.md names: authn/authz, IDOR, tenant isolation, personal data handling, error payloads that leak internals, oversized message payloads.
+      4. Every finding needs file, evidence and a stable rule id (semgrep/<id>, gitleaks/<id>, security/<topic>). severity: blocking (exploitable), major (must fix before merge), minor (observation).
 
-      Reply with:
+      Reply with exactly one of:
       STATUS: done
-      SECURITY: findings and what you fixed (note any documented MEDIUM/LOW left open)
+      FINDINGS_JSON: [ ...only minor findings, or [] ]
+      SUMMARY: <finding count first, then what you checked>
 
-      If a HIGH/CRITICAL cannot be fixed without a human/product decision, end with STATUS: failed and a REASON: line — do NOT let the PR open with an unresolved high risk.
-    expects: "STATUS: done"
-    max_retries: 3
-    on_fail:
-      escalate_to: human
+      STATUS: retry
+      FINDINGS_JSON: [{"rule":"...","severity":"blocking|major|minor","file":"...","line":1,"symbol":"...","evidence":"...","expected":"..."}]
+      SUMMARY: <finding count first>
 
-  - id: ci-local
-    agent: developer
+      If you cannot verify because of something code cannot fix (environment, missing tool, credentials), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
+    expects: "regex:^STATUS: (done|retry|blocked)$"
+    max_retries: 2
+    on_fail: { fix_step: fix, max_rounds: 3 }
+
+  - id: gate-review-checks
+    type: bash
+    run: node scripts/gates/review-checks.mjs
+    on_fail: { fix_step: fix, max_rounds: 3 }
+
+  - id: gate-review
+    agent: reviewer
     input: |
-      Run the project's LOCAL CI gate and make it fully green before the PR.
+      Code review of the branch. You are READ-ONLY: never edit, create, delete or
+      commit files. Report findings; the developer fixes them.
 
       REPO: {{repo}}
       BRANCH: {{branch}}
+      BASE BRANCH: {{base_branch}}
+      PLANS: {{plan_set}}
+      LAST REVIEWED COMMIT: {{reviewed_sha}}
 
-      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises):
+      ARCHITECTURE CHECKS OUTPUT (gate-review-checks, last 200 lines):
+      {{gate_review_checks_output}}
+
+      FINDINGS YOU RAISED BEFORE (JSON, with status):
+      {{findings_gate_review}}
+
+      RETRY FEEDBACK (only if your previous reply was rejected):
+      {{retry_feedback}}
+
+      Scope:
+      - If LAST REVIEWED COMMIT is empty: review git diff origin/{{base_branch}}...HEAD (fall back to {{base_branch}}...HEAD).
+      - Otherwise this is a re-review: review ONLY git diff {{reviewed_sha}}..HEAD (the fix commits). Do not repeat a finding whose status is resolved unless the new diff brings it back. Re-raise an open finding only if it is still present.
+
+      Instructions:
+      1. Read REVIEW.md at the repository root if it exists: its rule ids, skip paths and nit cap are binding. Otherwise use the review skill your project's CLAUDE.md names.
+      2. Check: the plans' intent is met, ubiquitous language, user-facing text goes through localization, tests test behavior, living docs updated when the change warrants it, the conventions in the repository's planning docs.
+      3. Every finding needs file, evidence (file:line) and the stable rule id. severity: blocking, major, minor (minor is listed in the PR, never fixed by the loop).
+
+      Reply with exactly one of (always include REVIEWED_SHA = output of git rev-parse HEAD):
+      STATUS: done
+      FINDINGS_JSON: [ ...only minor findings, or [] ]
+      REVIEWED_SHA: <sha>
+      SUMMARY: <finding count first>
+
+      STATUS: retry
+      FINDINGS_JSON: [{"rule":"...","severity":"blocking|major|minor","file":"...","line":1,"symbol":"...","evidence":"...","expected":"..."}]
+      REVIEWED_SHA: <sha>
+      SUMMARY: <finding count first>
+
+      If you cannot verify because of something code cannot fix (environment, missing tool, credentials), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
+    expects: "regex:^STATUS: (done|retry|blocked)$"
+    max_retries: 2
+    on_fail: { fix_step: fix, max_rounds: 3 }
+
+  - id: gate-e2e-checks
+    type: bash
+    run: node scripts/gates/e2e-checks.mjs
+    on_fail: { fix_step: fix, max_rounds: 3 }
+
+  - id: gate-e2e
+    agent: tester
+    input: |
+      Acceptance verification in a real browser. You are READ-ONLY: never edit,
+      create, delete or commit files in the repository. Keep browser artifacts
+      (snapshots, screenshots, traces) in gitignored directories or the OS temp dir, never in the repo.
+
+      FEATURE COMPLETE: {{feature_complete}}
+      If FEATURE COMPLETE is 'false', reply immediately:
+      STATUS: done
+      FINDINGS_JSON: []
+      SUMMARY: 0 findings — E2E skipped (FEATURE_COMPLETE=false)
+
+      Otherwise:
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      PLANS: {{plan_set}}
+      E2E SUITE OUTPUT (gate-e2e-checks, last 200 lines):
+      {{gate_e2e_checks_output}}
+      FINDINGS YOU RAISED BEFORE (JSON, with status):
+      {{findings_gate_e2e}}
+      RETRY FEEDBACK (only if your previous reply was rejected):
       {{retry_feedback}}
 
       Instructions:
-      1. This is the gate lefthook enforces on push. Run it explicitly now (read CLAUDE.md "Push & Quality Gates" for exact scope):
-         - Backend: src/ci-local.bat (format, build, tests, vulnerability scan).
-         - Frontend, ONLY if the plan touched them:
-             frontend/admin-spa  -> pnpm ci:local (audit, lint, typecheck, test coverage)
-             frontend/public-nuxt -> pnpm ci:local (audit, lint, typecheck)
-      2. If anything fails, apply superpowers:systematic-debugging to find the root cause, FIX it, commit (repo conventions), and re-run until every gate is green. Do NOT disable checks or skip tests to pass.
+      1. Follow the E2E / browser skill your project's CLAUDE.md names to start the app and drive it.
+      2. Walk EVERY acceptance criterion of every plan in the plan set. For each unmet criterion raise a finding (rule e2e/acceptance-criterion, file = the plan file, symbol = the criterion id or a short slug, evidence = what you saw).
+      3. If the plans deliver a complete user-facing feature and the repository has no E2E test covering it, raise rule e2e/missing-test (severity major, file = the feature's main UI file).
 
-      Reply with:
+      Reply with exactly one of:
       STATUS: done
-      CI: which gates you ran and their final (green) result
+      FINDINGS_JSON: [ ...only minor findings, or [] ]
+      SUMMARY: <finding count first, criteria walked>
 
-      If a gate cannot pass after honest effort, end with STATUS: failed and a REASON: line.
-    expects: "STATUS: done"
-    max_retries: 3
-    on_fail:
-      escalate_to: human
+      STATUS: retry
+      FINDINGS_JSON: [{"rule":"...","severity":"blocking|major|minor","file":"...","symbol":"...","evidence":"...","expected":"..."}]
+      SUMMARY: <finding count first>
+
+      If you cannot verify because of something code cannot fix (environment, missing tool, credentials), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
+    expects: "regex:^STATUS: (done|retry|blocked)$"
+    max_retries: 2
+    on_fail: { fix_step: fix, max_rounds: 3 }
+
+  - id: gate-ci-local
+    type: bash
+    run: node scripts/gates/ci-local.mjs
+    on_fail: { fix_step: fix, max_rounds: 3 }
 
   - id: pr
-    agent: developer
+    agent: pr
     input: |
-      Open the pull request. Do NOT merge — opening the PR is the end of the line.
+      Publish the branch and open the pull request. Do NOT merge — opening the PR is the end of the line.
 
       REPO: {{repo}}
       BRANCH: {{branch}}
       BASE BRANCH: {{base_branch}}
-      PLAN: {{task}}
-      CHANGES: {{changes}}
-      REVIEW: {{review}}
-      SECURITY: {{security}}
-      CI: {{ci}}
+      SPEC/PLANS: {{task}}
+      PLAN SUMMARY: {{plan_summary}}
 
-      RETRY FEEDBACK (only present if your previous attempt failed — fix exactly what it raises, e.g. push rejection or gh auth):
+      OBSERVATIONS (minor findings, list them verbatim in the PR body under "## Observations"):
+      {{minor_findings}}
+
+      RETRY FEEDBACK (only if your previous reply was rejected):
       {{retry_feedback}}
 
       Instructions:
-      1. The local CI gate already ran and is green, so push WITHOUT re-running hooks:
-         git push --no-verify -u origin {{branch}}
-      2. Open the PR against the base branch:
-         gh pr create --base {{base_branch}} --head {{branch}} --title "<clear title>" --body "<what & why; link the plan {{task}}; tests run; review + security summary>"
-      3. Do NOT merge, squash, rebase-merge, or close the PR. Stop once it is open.
+      1. Push with the hooks enabled — NEVER pass --no-verify:
+         git push -u origin {{branch}}
+         The repository's pre-push hook, if any, runs here.
+      2. If the push fails because a HOOK failed (lint, build, tests, scans), do not fix anything yourself. Reply:
+         STATUS: retry
+         FINDINGS_JSON: [{"rule":"gate/pre-push","severity":"blocking","file":".","evidence":"<last 200 lines of the hook output>"}]
+      3. If the push or the PR fails for a reason that is NOT code (remote rejected the push, authentication, network, gh not logged in), reply:
+         STATUS: blocked
+         REASON: <what a human must do>
+      4. Write the PR body (what & why; link {{task}}; gates passed; ## Observations) to a file in the OS temp dir,
+         outside the repository, then open the PR from that file:
+         gh pr create --base {{base_branch}} --head {{branch}} --title "<clear title>" --body-file <that file>
+         Never interpolate the findings, evidence or any other free text into a command line.
+      5. Never merge, squash, rebase-merge or close the PR.
+
+      On success reply:
+      STATUS: done
+      PR: <URL of the pull request>
+    expects: "regex:^STATUS: (retry|blocked)$|^PR:\\s*https?://\\S+"
+    max_retries: 2
+    on_fail: { fix_step: fix, max_rounds: 2, return_step: gate-ci-local }
+
+  - id: fix
+    agent: developer
+    input: |
+      Fix the findings a gate raised. You are the ONLY agent allowed to change code.
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      BASE BRANCH: {{base_branch}}
+      PLANS: {{plan_set}}
+      FAILING GATE: {{fix_origin}}
+
+      FINDINGS (JSON — each has a fingerprint; only blocking/major are sent to you):
+      {{fix_feedback}}
+
+      RETRY FEEDBACK (only if your previous attempt was rejected):
+      {{retry_feedback}}
+
+      Rules (see your AGENTS.md "Fix step"):
+      - Fix the root cause. Never disable a check, skip or delete a test, lower a threshold, or suppress a warning to make a gate pass.
+      - If a finding is wrong, dispute it with a concrete reason instead of changing code. A disputed finding raised again stops the run for a human.
+      - Run the unit tests affected by your change before replying. Commit with the repository's conventions. Do NOT push.
 
       Reply with:
       STATUS: done
-      PR: <URL to the pull request>
-    expects: "STATUS: done\nregex:PR:\\s*https?://github\\.com/[^/]+/[^/]+/pull/\\d+"
-    on_fail:
-      escalate_to: human
+      CHANGES: <what you changed, per finding>
+      TESTS: <tests you ran and their result>
+      RESOLVED: ["<fingerprint>", ...]
+      DISPUTED_JSON: [{"fingerprint":"<fingerprint>","reason":"<why it is not a defect>"}]
+
+      If you cannot fix the findings because the cause is not in the code (environment, credentials, a product decision), reply instead:
+      STATUS: blocked
+      REASON: <what a human must do>
+    expects: "regex:^STATUS: (done|retry|blocked)$"
+    max_retries: 2

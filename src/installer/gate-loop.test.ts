@@ -7,6 +7,7 @@ import {
   parseFixPolicy,
   serializeFixPolicy,
   prepareBlockedRunResume,
+  applyBudgetOverrides,
   bashOutputContextKey,
   tailLines,
   blockRunAtStep,
@@ -264,5 +265,29 @@ describe("blockRunAtStep", () => {
     block();
     assert.equal(runRow().status, "failed");
     assert.equal(getRunEvents("run-1").some((e) => e.event === "run.blocked"), false);
+  });
+});
+
+describe("applyBudgetOverrides", () => {
+  let home: TempTamanduaHome;
+  beforeEach(() => {
+    home = useTempTamanduaHome("tamandua-budget-overrides-");
+    seedRun(getDb(), { id: "run-1", maxFixRounds: 8 }, []);
+  });
+  afterEach(() => { closeDb(); home.restore(); });
+
+  const budgets = () => ({ ...(getDb().prepare("SELECT max_fix_rounds, max_rounds_override, max_tokens FROM runs WHERE id = 'run-1'").get() as Record<string, number | null>) });
+
+  it("stores only the provided overrides", () => {
+    applyBudgetOverrides("run-1", { maxFixRounds: 10 });
+    assert.deepEqual(budgets(), { max_fix_rounds: 10, max_rounds_override: null, max_tokens: null });
+    applyBudgetOverrides("run-1", { maxRounds: 4, maxTokens: 100 });
+    assert.deepEqual(budgets(), { max_fix_rounds: 10, max_rounds_override: 4, max_tokens: 100 });
+  });
+
+  it("rejects non-positive or fractional values without writing anything", () => {
+    assert.throws(() => applyBudgetOverrides("run-1", { maxFixRounds: 3, maxTokens: 0 }), /maxTokens must be a positive integer/);
+    assert.throws(() => applyBudgetOverrides("run-1", { maxRounds: 1.5 }), /maxRounds must be a positive integer/);
+    assert.deepEqual(budgets(), { max_fix_rounds: 8, max_rounds_override: null, max_tokens: null });
   });
 });
