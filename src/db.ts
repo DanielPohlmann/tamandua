@@ -20,7 +20,7 @@ function resolveDbPath(): string {
 export function getDb(): DatabaseSync {
   const now = Date.now();
   const dbPath = resolveDbPath();
-  if (_db && _dbPath === dbPath && (now - _dbOpenedAt) < DB_MAX_AGE_MS) return _db;
+  if (_db && _dbPath === dbPath && ((now - _dbOpenedAt) < DB_MAX_AGE_MS || isInTransaction(_db))) return _db;
   // Only close if the ref is non-null (avoid double-close warnings)
   if (_db) {
     try {
@@ -39,6 +39,34 @@ export function getDb(): DatabaseSync {
   _db.exec("PRAGMA foreign_keys=ON");
   migrate(_db);
   return _db;
+}
+
+let transactionDepth = 0;
+
+function isInTransaction(db: DatabaseSync): boolean {
+  return typeof db.isTransaction === "boolean" ? db.isTransaction : transactionDepth > 0;
+}
+
+/**
+ * Runs `fn` inside one BEGIN IMMEDIATE transaction. A nested call joins the
+ * transaction already open on the connection, so the outermost caller commits
+ * once and a throw anywhere rolls back everything.
+ */
+export function inTransaction<T>(fn: () => T): T {
+  const db = getDb();
+  if (isInTransaction(db)) return fn();
+  db.exec("BEGIN IMMEDIATE");
+  transactionDepth++;
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (db.isTransaction !== false) db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    transactionDepth--;
+  }
 }
 
 function migrate(db: DatabaseSync): void {
@@ -155,6 +183,8 @@ function migrate(db: DatabaseSync): void {
     ["on_fail", "TEXT"],
     ["invoked_by", "TEXT"],
     ["fix_rounds", "INTEGER NOT NULL DEFAULT 0"],
+    ["agent_role", "TEXT"],
+    ["worktree_baseline", "TEXT"],
   ];
   for (const [name, type] of gateStepColumns) {
     if (!stepColNames.has(name)) db.exec(`ALTER TABLE steps ADD COLUMN ${name} ${type}`);
@@ -163,6 +193,8 @@ function migrate(db: DatabaseSync): void {
     ["fix_rounds", "INTEGER NOT NULL DEFAULT 0"],
     ["max_fix_rounds", "INTEGER"],
     ["max_rounds_override", "INTEGER"],
+    ["max_tokens", "INTEGER"],
+    ["notify_format", "TEXT"],
   ];
   for (const [name, type] of gateRunColumns) {
     if (!runColNames.has(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);

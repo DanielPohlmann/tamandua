@@ -212,6 +212,14 @@ export function getEventsPath(): string {
 
 // ── Webhook Support ──────────────────────────────────────────────────
 
+function urlOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "(invalid url)";
+  }
+}
+
 /**
  * Fire-and-forget POST to the webhook URL configured for a run.
  * Looks up the notify_url from the runs table.
@@ -226,20 +234,24 @@ async function fireWebhook(evt: TamanduaEvent): Promise<void> {
     "step.failed",
     "step.worker_lost",
     "pipeline.advanced",
+    "run.blocked",
+    "run.pr_opened",
   ]);
 
   if (!significantEvents.has(evt.event)) return;
 
   let notifyUrl: string | undefined;
+  let notifyFormat: string | null = null;
 
   // Try to look up notify_url from the DB
   try {
     const { getDb } = await import("../db.js");
     const db = getDb();
     const row = db
-      .prepare("SELECT notify_url FROM runs WHERE id = ?")
-      .get(evt.runId) as { notify_url: string | null } | undefined;
+      .prepare("SELECT notify_url, notify_format FROM runs WHERE id = ?")
+      .get(evt.runId) as { notify_url: string | null; notify_format: string | null } | undefined;
     notifyUrl = row?.notify_url ?? undefined;
+    notifyFormat = row?.notify_format ?? null;
   } catch {
     // DB might not be available — skip webhook
     return;
@@ -247,25 +259,34 @@ async function fireWebhook(evt: TamanduaEvent): Promise<void> {
 
   if (!notifyUrl) return;
 
-  const payload = JSON.stringify(evt);
-
   // Use global fetch (Node 18+)
   try {
+    let body = JSON.stringify(evt);
+    let headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (notifyFormat === "ntfy") {
+      const { buildNtfyRequest } = await import("./notifications.js");
+      const request = buildNtfyRequest(evt);
+      if (!request) return;
+      body = request.body;
+      headers = { "Content-Type": "text/plain; charset=utf-8", ...request.headers };
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
-
-    await fetch(notifyUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
+    try {
+      await fetch(notifyUrl, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (err) {
-    // Fire-and-forget: log and move on
+    // Fire-and-forget: log and move on. Only the origin is logged: the path may hold a secret topic or token.
     logger.warn("Webhook POST failed", {
-      url: notifyUrl,
+      url: urlOrigin(notifyUrl),
       event: evt.event,
       runId: evt.runId,
       error: String(err),

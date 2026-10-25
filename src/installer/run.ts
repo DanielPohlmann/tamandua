@@ -10,6 +10,7 @@ import {
   registerRunWithDaemon,
 } from "../server/control-client.js";
 import { emitEvent } from "./events.js";
+import { inferRole } from "./install.js";
 import { advancePipeline, scheduleRunCronTeardown } from "./step-ops.js";
 import {
   RUN_CONTEXT_WORKING_DIRECTORY_FOR_HARNESS_KEY,
@@ -24,12 +25,14 @@ import {
   serializeFixPolicy,
   type BudgetOverrides,
 } from "./gate-loop.js";
+import { resolveNotifyTarget, type NotifyFormat } from "./notifications.js";
 import { BASH_ENV_KEYS_CONTEXT_KEY, type HarnessType, type WorkflowSpec } from "./types.js";
 
 export interface RunWorkflowParams {
   workflowId: string;
   taskTitle: string;
   notifyUrl?: string;
+  notifyFormat?: NotifyFormat;
   /** Optional initial context for template resolution */
   context?: Record<string, string>;
   /** Working directory for the pi harness/tool execution environment */
@@ -79,11 +82,17 @@ export function buildEngineContextDefaults(workflow: WorkflowSpec): Record<strin
 export function insertRunSteps(workflow: WorkflowSpec, runId: string, now: string): void {
   const insertStep = getDb().prepare(
     `INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, retry_count,
-                        max_retries, type, loop_config, run_command, on_fail, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?, ?, ?)`,
+                        max_retries, type, loop_config, run_command, on_fail, agent_role, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  const scopePrefix = `${workflow.id}_`;
+  const roleOf = (stepAgent: string) => {
+    const agentId = stepAgent.startsWith(scopePrefix) ? stepAgent.slice(scopePrefix.length) : stepAgent;
+    const agent = workflow.agents.find((a) => a.id === stepAgent) ?? workflow.agents.find((a) => a.id === agentId);
+    return agent?.role ?? inferRole(agentId);
+  };
   workflow.steps.forEach((step, i) => {
-    const scopedAgentId = step.agent.startsWith(`${workflow.id}_`) ? step.agent : `${workflow.id}_${step.agent}`;
+    const scopedAgentId = step.agent.startsWith(scopePrefix) ? step.agent : `${scopePrefix}${step.agent}`;
     insertStep.run(
       crypto.randomUUID(),
       runId,
@@ -97,6 +106,7 @@ export function insertRunSteps(workflow: WorkflowSpec, runId: string, now: strin
       step.loop ? JSON.stringify(step.loop) : null,
       step.type === "bash" ? step.run ?? null : null,
       serializeFixPolicy(step.on_fail),
+      roleOf(step.agent),
       now,
       now,
     );
@@ -291,17 +301,18 @@ export async function runWorkflow(
   }
 
   const contextJson = JSON.stringify(seededContext);
+  const notifyTarget = resolveNotifyTarget({ explicitUrl: notifyUrl, explicitFormat: params.notifyFormat, workflow });
 
   // Insert the run record. New runs start with
   // scheduling_status='pending_register' so the daemon control plane
   // (and/or reconciler) can admit them.
   db.prepare(
     `INSERT INTO runs (id, run_number, workflow_id, task, status, context, tokens_spent,
-                       scheduling_status, scheduling_requested_at, notify_url, max_fix_rounds,
+                       scheduling_status, scheduling_requested_at, notify_url, notify_format, max_fix_rounds, max_tokens,
                        created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?)`,
-  ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyUrl ?? null,
-    workflow.budgets?.max_fix_rounds ?? DEFAULT_MAX_FIX_ROUNDS, now, now);
+     VALUES (?, ?, ?, ?, 'running', ?, 0, 'pending_register', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(runId, runNumber, workflowId, taskTitle, contextJson, now, notifyTarget.url, notifyTarget.format,
+    workflow.budgets?.max_fix_rounds ?? DEFAULT_MAX_FIX_ROUNDS, workflow.budgets?.max_tokens ?? null, now, now);
 
   insertRunSteps(workflow, runId, now);
 
@@ -437,6 +448,7 @@ export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON
 interface BlockedRunSnapshot {
   run: {
     status: string; context: string; max_fix_rounds: number | null; max_rounds_override: number | null;
+    max_tokens: number | null;
     scheduling_status: string | null; scheduling_requested_at: string | null; scheduling_error: string | null;
   };
   step: { status: string; fix_rounds: number } | undefined;
@@ -446,7 +458,7 @@ interface BlockedRunSnapshot {
 function snapshotBlockedRun(runId: string, context: string): BlockedRunSnapshot {
   const db = getDb();
   const run = db.prepare(
-    `SELECT status, context, max_fix_rounds, max_rounds_override, scheduling_status, scheduling_requested_at,
+    `SELECT status, context, max_fix_rounds, max_rounds_override, max_tokens, scheduling_status, scheduling_requested_at,
             scheduling_error FROM runs WHERE id = ?`,
   ).get(runId) as BlockedRunSnapshot["run"];
   const stepName = (JSON.parse(context) as Record<string, string>).blocked_step;
@@ -459,9 +471,9 @@ function restoreBlockedRun(runId: string, snapshot: BlockedRunSnapshot, message:
   const db = getDb();
   const { run, step, stepName } = snapshot;
   db.prepare(
-    `UPDATE runs SET status = ?, context = ?, max_fix_rounds = ?, max_rounds_override = ?, scheduling_status = NULL,
+    `UPDATE runs SET status = ?, context = ?, max_fix_rounds = ?, max_rounds_override = ?, max_tokens = ?, scheduling_status = NULL,
             scheduling_requested_at = ?, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?`,
-  ).run(run.status, run.context, run.max_fix_rounds, run.max_rounds_override, run.scheduling_requested_at, message, runId);
+  ).run(run.status, run.context, run.max_fix_rounds, run.max_rounds_override, run.max_tokens, run.scheduling_requested_at, message, runId);
   if (step) {
     db.prepare("UPDATE steps SET status = ?, fix_rounds = ?, updated_at = datetime('now') WHERE run_id = ? AND step_id = ?")
       .run(step.status, step.fix_rounds, runId, stepName);

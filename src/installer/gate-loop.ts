@@ -1,4 +1,4 @@
-import { getDb } from "../db.js";
+import { getDb, inTransaction } from "../db.js";
 import { emitEvent } from "./events.js";
 import { logger } from "../lib/logger.js";
 import {
@@ -45,6 +45,7 @@ export type GateSettlement = { status: "fixing" | "blocked"; detail: string } | 
 export interface BudgetOverrides {
   maxRounds?: number;
   maxFixRounds?: number;
+  maxTokens?: number;
 }
 
 export function serializeFixPolicy(onFail: WorkflowStepFailure | undefined): string | null {
@@ -73,25 +74,6 @@ export function contextKeyFor(prefix: string, stepId: string): string {
 
 export function bashOutputContextKey(stepId: string): string {
   return `${stepId.replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}_output`;
-}
-
-let transactionDepth = 0;
-
-function inTransaction<T>(fn: () => T): T {
-  const db = getDb();
-  if (transactionDepth > 0) return fn();
-  db.exec("BEGIN IMMEDIATE");
-  transactionDepth++;
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  } finally {
-    transactionDepth--;
-  }
 }
 
 export function mergeRunContext(runId: string, patch: Record<string, string>): void {
@@ -144,6 +126,12 @@ function toFixFeedback(findings: StoredFinding[]): string {
   })));
 }
 
+function existingBlockedReason(runId: string): string | undefined {
+  const row = getDb().prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string } | undefined;
+  return row ? (JSON.parse(row.context) as Record<string, string>).blocked_reason : undefined;
+}
+
+/** Blocks a running or paused run at a step; a run already blocked or finished is left as it is. */
 export function blockRunAtStep(params: {
   runId: string;
   stepDbId: string;
@@ -152,12 +140,21 @@ export function blockRunAtStep(params: {
   output: string;
 }): { status: "blocked"; detail: string } {
   const db = getDb();
-  inTransaction(() => {
-    db.prepare("UPDATE steps SET status = 'waiting', output = ?, updated_at = datetime('now') WHERE id = ?")
+  const blocked = inTransaction(() => {
+    const run = db.prepare("UPDATE runs SET status = 'blocked', updated_at = datetime('now') WHERE id = ? AND status IN ('running', 'paused')")
+      .run(params.runId);
+    if (Number(run.changes) !== 1) return false;
+    const step = db.prepare("SELECT current_story_id FROM steps WHERE id = ?").get(params.stepDbId) as
+      { current_story_id: string | null } | undefined;
+    if (step?.current_story_id) {
+      db.prepare("UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(step.current_story_id);
+    }
+    db.prepare("UPDATE steps SET status = 'waiting', output = ?, current_story_id = NULL, updated_at = datetime('now') WHERE id = ?")
       .run(params.output, params.stepDbId);
     mergeRunContext(params.runId, { blocked_step: params.stepName, blocked_reason: params.reason });
-    db.prepare("UPDATE runs SET status = 'blocked', updated_at = datetime('now') WHERE id = ?").run(params.runId);
+    return true;
   });
+  if (!blocked) return { status: "blocked", detail: existingBlockedReason(params.runId) ?? params.reason };
   emitEvent({
     ts: new Date().toISOString(),
     event: "run.blocked",
@@ -293,6 +290,9 @@ export function prepareBlockedRunResume(
     }
     if (overrides.maxFixRounds !== undefined) {
       db.prepare("UPDATE runs SET max_fix_rounds = ? WHERE id = ?").run(overrides.maxFixRounds, runId);
+    }
+    if (overrides.maxTokens !== undefined) {
+      db.prepare("UPDATE runs SET max_tokens = ? WHERE id = ?").run(overrides.maxTokens, runId);
     }
     delete context.blocked_step;
     delete context.blocked_reason;
