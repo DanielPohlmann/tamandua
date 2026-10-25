@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveTamanduaCli, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
+import { BASH_RUNNER_AGENT_ID } from "./types.js";
+import { executeBashRound, killProcessTree, recoverStaleBashSteps, schedulableAgents } from "./bash-step.js";
 import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
@@ -250,12 +252,41 @@ function buildStreamLogMetadata(stream: string): StreamLogMetadata {
 }
 
 function safeKillPgid(pgid: number, signal: NodeJS.Signals): void {
+  if (process.platform === "win32") {
+    killProcessTree(pgid, signal);
+    return;
+  }
   try {
     // Negative PID => kill the entire process group.
     process.kill(-pgid, signal);
   } catch {
     // Group may already be gone.
   }
+}
+
+const SIGKILL_FOLLOW_UP_MS = 5000;
+
+export interface ProcessGroupTerminationDeps {
+  platform: NodeJS.Platform;
+  kill: (pgid: number, signal: NodeJS.Signals) => void;
+  schedule: (fn: () => void, delayMs: number) => void;
+}
+
+const defaultTerminationDeps: ProcessGroupTerminationDeps = {
+  platform: process.platform,
+  kill: safeKillPgid,
+  schedule: (fn, delayMs) => { setTimeout(fn, delayMs).unref(); },
+};
+
+/**
+ * SIGTERM the group, then SIGKILL it after a grace period. On Windows the
+ * first call is already `taskkill /T /F`, and repeating it later could hit a
+ * reused PID, so there is no follow-up.
+ */
+export function terminateProcessGroup(pgid: number, deps: ProcessGroupTerminationDeps = defaultTerminationDeps): void {
+  deps.kill(pgid, "SIGTERM");
+  if (deps.platform === "win32") return;
+  deps.schedule(() => deps.kill(pgid, "SIGKILL"), SIGKILL_FOLLOW_UP_MS);
 }
 
 export async function runPi(
@@ -338,10 +369,8 @@ export async function runPi(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      // Terminate the whole process group: SIGTERM, then SIGKILL after 5s.
       if (pgid) {
-        safeKillPgid(pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(pgid);
       } else {
         try { child.kill("SIGKILL"); } catch { /* best effort */ }
       }
@@ -525,8 +554,7 @@ export async function runHermes(
       if (settled) return;
       settled = true;
       if (pgid) {
-        safeKillPgid(pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(pgid);
       } else {
         try { child.kill("SIGKILL"); } catch { /* best effort */ }
       }
@@ -706,8 +734,7 @@ export async function runClaude(
       if (settled) return;
       settled = true;
       if (pgid) {
-        safeKillPgid(pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(pgid);
       } else {
         try { child.kill("SIGKILL"); } catch { /* best effort */ }
       }
@@ -1601,6 +1628,25 @@ export async function executePollingRound(
     });
   }
 
+  if (agent.id === BASH_RUNNER_AGENT_ID) {
+    try {
+      const recovery = recoverStaleBashSteps(job, timeout);
+      if (recovery.recovered > 0 || recovery.failed > 0) {
+        logger.info("Stale bash claims recovered", { ...context, ...recovery });
+      }
+      const outcome = await executeBashRound(job, timeout, {
+        onSpawn: ({ pid, pgid }) => inFlightChildren.set(job.id, { pid, pgid, killed: false }),
+      });
+      logger.info("Bash round complete", { ...context, outcome });
+    } catch (err) {
+      logger.error("Bash round failed", { ...context, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      inFlightJobs.delete(job.id);
+      inFlightChildren.delete(job.id);
+    }
+    return;
+  }
+
   // ── Stale-claim sweeper (run-scoped) ─────────────────────────────
   try {
     const staleThresholdMs = timeout * 1.5 * 1000;
@@ -1909,8 +1955,9 @@ export async function setupAgentCrons(
 ): Promise<void> {
   const staggerBaseMs = 60_000; // 1 minute per agent
 
-  for (let i = 0; i < workflow.agents.length; i++) {
-    const agent = workflow.agents[i];
+  const agents = schedulableAgents(workflow);
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
     const staggerMs = i * staggerBaseMs;
 
     const jobId = buildJobId(workflow.id, runId, agent.id);
@@ -1976,10 +2023,8 @@ export async function removeRunCrons(runId: string): Promise<void> {
     const child = inFlightChildren.get(id);
     if (child && !child.killed) {
       child.killed = true;
-      // Terminate the entire process group: SIGTERM, then SIGKILL after 5s.
       if (child.pgid) {
-        safeKillPgid(child.pgid, "SIGTERM");
-        setTimeout(() => safeKillPgid(child.pgid, "SIGKILL"), 5000).unref();
+        terminateProcessGroup(child.pgid);
       }
     }
     inFlightChildren.delete(id);
@@ -2070,8 +2115,7 @@ export function shutdownAllCrons(): void {
   for (const [id, child] of inFlightChildren) {
     if (!child.killed && child.pgid) {
       child.killed = true;
-      safeKillPgid(child.pgid, "SIGTERM");
-      setTimeout(() => safeKillPgid(child.pgid, "SIGKILL"), 5000).unref();
+      terminateProcessGroup(child.pgid);
     }
   }
   inFlightChildren.clear();
@@ -2150,7 +2194,7 @@ export async function nudgeScheduledRuns(
         ? info.agentId.slice(info.workflowId.length + 1)
         : info.agentId;
 
-      const agent = workflow.agents.find(
+      const agent = schedulableAgents(workflow).find(
         (a) =>
           a.id === shortAgentId ||
           `${info.workflowId}_${a.id}` === info.agentId,

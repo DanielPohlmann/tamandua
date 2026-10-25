@@ -4,6 +4,7 @@ import { removeRunCrons } from "./agent-scheduler.js";
 import { terminateRunWithDaemon } from "../server/control-client.js";
 import { getRunWorktree, removeRunWorktree } from "./worktree-manager.js";
 import { emitEvent } from "./events.js";
+import { deleteRunFindings } from "./findings.js";
 
 export interface RunInfo {
   id: string;
@@ -179,6 +180,7 @@ export async function deleteWorkflow(
   }
 
   // Delete associated records in dependency order
+  deleteRunFindings(runId);
   db.prepare("DELETE FROM stories WHERE run_id = ?").run(runId);
   db.prepare("DELETE FROM steps WHERE run_id = ?").run(runId);
   db.prepare("DELETE FROM run_worktrees WHERE run_id = ?").run(runId);

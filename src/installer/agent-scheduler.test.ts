@@ -11,6 +11,7 @@ import {
   shutdownAllCrons,
   tryMarkJobInFlight,
   nudgeScheduledRuns,
+  terminateProcessGroup,
 } from "../../dist/installer/agent-scheduler.js";
 import type { SetupAgentCronsOptions, NudgeResult } from "../../dist/installer/agent-scheduler.js";
 import type { WorkflowSpec } from "../../dist/installer/types.js";
@@ -477,5 +478,32 @@ describe("nudgeScheduledRuns", () => {
     assert.equal(skipped.length, 1);
     assert.equal(launched[0].agentId, "wf-mixed_qa");
     assert.equal(skipped[0].agentId, "wf-mixed_dev");
+  });
+});
+
+describe("terminateProcessGroup", () => {
+  function recorder(platform: NodeJS.Platform) {
+    const signals: string[] = [];
+    const scheduled: Array<() => void> = [];
+    terminateProcessGroup(4242, {
+      platform,
+      kill: (pgid, signal) => signals.push(`${pgid}:${signal}`),
+      schedule: (fn) => { scheduled.push(fn); },
+    });
+    return { signals, scheduled };
+  }
+
+  it("sends SIGTERM and follows up with SIGKILL on POSIX", () => {
+    const { signals, scheduled } = recorder("linux");
+    assert.deepEqual(signals, ["4242:SIGTERM"]);
+    assert.equal(scheduled.length, 1);
+    scheduled[0]();
+    assert.deepEqual(signals, ["4242:SIGTERM", "4242:SIGKILL"]);
+  });
+
+  it("kills once on Windows, where taskkill /F is already forceful and a later retry could hit a reused PID", () => {
+    const { signals, scheduled } = recorder("win32");
+    assert.deepEqual(signals, ["4242:SIGTERM"]);
+    assert.equal(scheduled.length, 0);
   });
 });

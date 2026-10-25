@@ -11,8 +11,19 @@ import { logger } from "../lib/logger.js";
 import { getMaxRoleTimeoutSeconds } from "./install.js";
 import { loadWorkflowSpec } from "./workflow-spec.js";
 import { isFrontendChange } from "../lib/frontend-detect.js";
-import type { LoopConfig, Story, WorkflowStepFailure } from "./types.js";
+import { BASH_ENV_KEYS_CONTEXT_KEY, type LoopConfig, type Story, type WorkflowStepFailure } from "./types.js";
 import { detectRugpull, relaunchRunAfterRugpull } from "./rugpull.js";
+import {
+  EVIDENCE_LINES,
+  bashOutputContextKey,
+  blockRunAtStep,
+  completeFixStep,
+  mergeRunContext,
+  parseFixPolicy,
+  settleGate,
+  tailLines,
+} from "./gate-loop.js";
+import { parseFindingsJson } from "./findings.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Key-Value Parsing
@@ -69,6 +80,7 @@ const RESERVED_CONTEXT_KEYS = new Set([
   "worktree_origin_ref",
   "worktree_origin_sha",
   "original_branch",
+  BASH_ENV_KEYS_CONTEXT_KEY,
 ]);
 
 // ══════════════════════════════════════════════════════════════════════
@@ -491,7 +503,7 @@ export function cleanupAbandonedSteps(): void {
   const thresholdMs = ABANDONED_THRESHOLD_MS;
 
   const abandonedSteps = db.prepare(
-    "SELECT id, step_id, run_id, retry_count, max_retries, type, current_story_id, loop_config, abandoned_count FROM steps WHERE status = 'running' AND (julianday('now') - julianday(updated_at)) * 86400000 > ?"
+    "SELECT id, step_id, run_id, retry_count, max_retries, type, current_story_id, loop_config, abandoned_count FROM steps WHERE status = 'running' AND type != 'bash' AND (julianday('now') - julianday(updated_at)) * 86400000 > ?"
   ).all(thresholdMs) as {
     id: string; step_id: string; run_id: string; retry_count: number; max_retries: number;
     type: string; current_story_id: string | null; loop_config: string | null; abandoned_count: number;
@@ -887,15 +899,19 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
      JOIN runs r ON r.id = s.run_id
      WHERE s.agent_id = ? AND s.run_id = ? AND s.status = 'pending'
        AND r.status = 'running'
-       AND NOT EXISTS (
+       AND (s.invoked_by IS NOT NULL OR NOT EXISTS (
          SELECT 1 FROM steps prev
          WHERE prev.run_id = s.run_id
            AND prev.step_index < s.step_index
            AND prev.status NOT IN ('done', 'skipped')
+           AND NOT (prev.invoked_by IS NULL AND prev.step_id IN (
+             SELECT json_extract(g.on_fail, '$.fix_step') FROM steps g
+             WHERE g.run_id = s.run_id AND g.on_fail IS NOT NULL
+           ))
            AND NOT (prev.type = 'loop'
                     AND prev.status = 'running'
                     AND prev.current_story_id IS NULL)
-       )
+       ))
     ORDER BY s.step_index ASC, s.step_id ASC
      LIMIT 1`,
   ).get(agentId, runId) as {
@@ -1224,11 +1240,11 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, expects, input_template FROM steps WHERE id = ?"
+    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, expects, input_template, on_fail, invoked_by, fix_rounds FROM steps WHERE id = ?"
   ).get(stepId) as {
     id: string; run_id: string; step_id: string; step_index: number; type: string;
     loop_config: string | null; current_story_id: string | null; expects: string;
-    input_template: string | null;
+    input_template: string | null; on_fail: string | null; invoked_by: string | null; fix_rounds: number;
   } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
@@ -1277,11 +1293,12 @@ export function completeStep(stepId: string, output: string): { status: string; 
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(runId) as { context: string };
   const context: Record<string, string> = JSON.parse(run.context);
 
+  const isGate = parseFixPolicy(step.on_fail) !== null && step.type === "single";
   const parsed = parseOutputKeyValues(output);
   for (const [key, value] of Object.entries(parsed)) {
-    if (!RESERVED_CONTEXT_KEYS.has(key)) {
-      context[key] = value;
-    }
+    if (RESERVED_CONTEXT_KEYS.has(key)) continue;
+    if (isGate && key === "findings_json") continue;
+    context[key] = value;
   }
 
   db.prepare(
@@ -1356,6 +1373,43 @@ export function completeStep(stepId: string, output: string): { status: string; 
       } catch {
         // best-effort: if loop_config can't be parsed, don't block completion
       }
+    }
+  }
+
+  if (step.invoked_by) {
+    const fixStatus = parsed["status"]?.toLowerCase();
+    if (fixStatus === "blocked") {
+      const blocked = blockRunAtStep({
+        runId, stepDbId: step.id, stepName: step.step_id,
+        reason: parsed["reason"] || "Fix step reported STATUS: blocked", output,
+      });
+      finalizeDrainingPause(runId);
+      return blocked;
+    }
+    if (fixStatus === "retry") {
+      return retryWithFeedback(step, parsed["reason"] || "Fix step reported STATUS: retry");
+    }
+    const fixResult = completeFixStep({ ...step, invoked_by: step.invoked_by }, output);
+    finalizeDrainingPause(runId);
+    return fixResult;
+  }
+
+  const fixPolicy = parseFixPolicy(step.on_fail);
+  if (fixPolicy && step.type === "single") {
+    const reported = parseFindingsJson(output);
+    if (reported.malformed) {
+      return retryWithFeedback(step, "FINDINGS_JSON could not be parsed. Emit a single-line JSON array after 'FINDINGS_JSON: '.");
+    }
+    const statusValue = parsed["status"]?.toLowerCase();
+    const settlement = settleGate(step, fixPolicy, {
+      failed: statusValue === "retry",
+      blockedReason: statusValue === "blocked" ? (parsed["reason"] || "Step reported STATUS: blocked") : undefined,
+      findings: reported.findings,
+      output,
+    });
+    if (settlement) {
+      finalizeDrainingPause(runId);
+      return settlement;
     }
   }
 
@@ -1558,6 +1612,89 @@ function checkLoopContinuation(runId: string, loopStepId: string): { advanced: b
   return advancePipeline(runId);
 }
 
+function retryWithFeedback(
+  step: { id: string; run_id: string; step_id: string },
+  message: string,
+): { status: string; detail?: string } {
+  const db = getDb();
+  const meta = db.prepare("SELECT retry_count, max_retries FROM steps WHERE id = ?").get(step.id) as
+    { retry_count: number; max_retries: number };
+  const newRetry = meta.retry_count + 1;
+  const wfId = getWorkflowId(step.run_id);
+  if (newRetry > meta.max_retries) {
+    db.prepare("UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(message, newRetry, step.id);
+    db.prepare("UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(step.run_id);
+    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail: message });
+    emitRunTerminalEvent({ event: "run.failed", runId: step.run_id, workflowId: wfId, detail: message });
+    scheduleRunCronTeardown(step.run_id);
+    finalizeDrainingPause(step.run_id);
+    return { status: "failed" };
+  }
+  db.prepare("UPDATE steps SET status = 'pending', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(message, newRetry, step.id);
+  emitEvent({ ts: new Date().toISOString(), event: "step.retry", runId: step.run_id, workflowId: wfId, stepId: step.step_id, detail: message });
+  finalizeDrainingPause(step.run_id);
+  return { status: "retrying", detail: message };
+}
+
+/**
+ * Complete a `type: bash` step from its exit code and combined output.
+ * Bash output is never merged as KEY: value lines; agents read it from `<step>_output`.
+ *
+ * `blockedReason` marks a failure the fix agent cannot act on (engine error,
+ * timeout): a gated step blocks the run instead of starting a fix round, and an
+ * ungated step fails through the ordinary retry path with that reason.
+ */
+export async function completeBashStep(
+  stepId: string,
+  exitCode: number,
+  output: string,
+  blockedReason?: string,
+): Promise<{ status: string; detail?: string }> {
+  const db = getDb();
+  const step = db.prepare("SELECT id, run_id, step_id, status, on_fail, fix_rounds FROM steps WHERE id = ?").get(stepId) as
+    { id: string; run_id: string; step_id: string; status: string; on_fail: string | null; fix_rounds: number } | undefined;
+  if (!step) throw new Error(`Step not found: ${stepId}`);
+  if (step.status !== "running") {
+    // A recovered or re-claimed step must not absorb a result from an earlier attempt.
+    logger.warn("Ignoring bash result for a step that is no longer running", { runId: step.run_id, stepId: step.step_id, status: step.status });
+    return { status: "ignored", detail: `step is ${step.status}` };
+  }
+  const run = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
+  if (run?.status !== "running") return { status: "blocked" };
+
+  const evidence = tailLines(output, EVIDENCE_LINES);
+  mergeRunContext(step.run_id, { [bashOutputContextKey(step.step_id)]: evidence });
+
+  const policy = parseFixPolicy(step.on_fail);
+  if (blockedReason) {
+    if (!policy) return failStep(stepId, `${blockedReason}\n${evidence}`);
+    const blocked = blockRunAtStep({ runId: step.run_id, stepDbId: step.id, stepName: step.step_id, reason: blockedReason, output: evidence });
+    finalizeDrainingPause(step.run_id);
+    return blocked;
+  }
+  if (policy) {
+    const settlement = settleGate(step, policy, {
+      failed: exitCode !== 0,
+      findings: parseFindingsJson(output).findings,
+      output: evidence,
+    });
+    if (settlement) {
+      finalizeDrainingPause(step.run_id);
+      return settlement;
+    }
+  } else if (exitCode !== 0) {
+    return failStep(stepId, `Command exited with code ${exitCode}\n${evidence}`);
+  }
+
+  db.prepare("UPDATE steps SET status = 'done', output = ?, updated_at = datetime('now') WHERE id = ?").run(evidence, stepId);
+  emitEvent({ ts: new Date().toISOString(), event: "step.done", runId: step.run_id, workflowId: getWorkflowId(step.run_id), stepId: step.step_id });
+  const pipelineResult = advancePipeline(step.run_id);
+  finalizeDrainingPause(step.run_id);
+  return { status: pipelineResult.runCompleted ? "completed" : "advanced" };
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Advance Pipeline
 // ══════════════════════════════════════════════════════════════════════
@@ -1571,7 +1708,8 @@ export function advancePipeline(runId: string): { advanced: boolean; runComplete
 
   // Guard: don't advance or complete a run that's already failed/cancelled
   const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
-  if (runStatus?.status === "failed" || runStatus?.status === "canceled") {
+  if (runStatus?.status === "failed" || runStatus?.status === "canceled"
+    || runStatus?.status === "blocked") {
     return { advanced: false, runCompleted: false };
   }
 
@@ -1583,8 +1721,14 @@ export function advancePipeline(runId: string): { advanced: boolean; runComplete
   }
 
   const next = db.prepare(
-    "SELECT id, step_id FROM steps WHERE run_id = ? AND status = 'waiting' ORDER BY step_index ASC LIMIT 1"
-  ).get(runId) as { id: string; step_id: string } | undefined;
+    `SELECT id, step_id FROM steps
+     WHERE run_id = ? AND status = 'waiting'
+       AND step_id NOT IN (
+         SELECT json_extract(on_fail, '$.fix_step') FROM steps
+         WHERE run_id = ? AND on_fail IS NOT NULL AND json_extract(on_fail, '$.fix_step') IS NOT NULL
+       )
+     ORDER BY step_index ASC LIMIT 1`
+  ).get(runId, runId) as { id: string; step_id: string } | undefined;
 
   const incomplete = db.prepare(
     "SELECT id FROM steps WHERE run_id = ? AND status IN ('failed', 'pending', 'running') LIMIT 1"
@@ -1837,6 +1981,7 @@ export function resolveStepContext(
   ).all(runId, stepIndex) as { id: string; output: string | null; step_id: string; type: string }[];
 
   for (const prev of prevSteps) {
+    if (prev.type === "bash") continue;
     if (prev.output) {
       const parsed = parseOutputKeyValues(prev.output);
       for (const [key, value] of Object.entries(parsed)) {
