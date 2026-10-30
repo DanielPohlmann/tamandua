@@ -1,12 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildPollingPrompt, buildAgentPrompt, buildWorkPrompt, STEP_OUTPUT_CONTRACT } from "../dist/installer/agent-scheduler.js";
-import { resolveTamanduaCli } from "../dist/installer/paths.js";
+import { resolveTamanduaCli, resolveTamanduaCliCommand } from "../dist/installer/paths.js";
 
 describe("polling prompt protocol", () => {
   const cli = resolveTamanduaCli();
 
-  it("invokes the shell launcher directly instead of through node", () => {
+  it("invokes the CLI with the platform's runnable command", () => {
     for (const prompt of [
       buildPollingPrompt("wf", "wf_reviewer", "run-1"),
       buildAgentPrompt("wf", "wf_reviewer", "run-1"),
@@ -14,7 +14,17 @@ describe("polling prompt protocol", () => {
     ]) {
       assert.ok(!prompt.includes(`node "${cli}"`), "must not run the sh launcher with node");
     }
-    assert.ok(buildPollingPrompt("wf", "wf_reviewer", "run-1").includes(`"${cli}" step peek "wf_reviewer" --run-id "run-1"`));
+    assert.ok(buildPollingPrompt("wf", "wf_reviewer", "run-1").includes(`${resolveTamanduaCliCommand()} step peek "wf_reviewer" --run-id "run-1"`));
+  });
+
+  it("quotes the shell launcher on POSIX", () => {
+    assert.equal(resolveTamanduaCliCommand("linux"), `"${cli}"`);
+  });
+
+  it("runs cli.js through node on Windows, where the extensionless launcher opens an app picker", () => {
+    const command = resolveTamanduaCliCommand("win32");
+    assert.match(command, /^node --disable-warning=ExperimentalWarning ".*cli\.js"$/);
+    assert.ok(!command.includes(cli), "must not reference the sh launcher");
   });
 
   it("embeds the step output contract", () => {

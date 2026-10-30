@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { resolveTamanduaCli } from "../installer/paths.js";
+import { resolveTamanduaCliCommand } from "../installer/paths.js";
 import {
   createAgentCronJob,
   removeAgentCrons,
@@ -55,12 +55,12 @@ function removeMedicCronConfig(): void {
  * to run the medic check via the tamandua CLI.
  */
 export function buildMedicPrompt(): string {
-  const cli = resolveTamanduaCli();
+  const cli = resolveTamanduaCliCommand();
   return `You are the Tamandua Medic — a health watchdog for workflow runs.
 
 Run the medic check:
 \`\`\`
-node ${cli} medic run --json
+${cli} medic run --json
 \`\`\`
 
 If the check output contains "issuesFound": 0, reply HEARTBEAT_OK and stop.

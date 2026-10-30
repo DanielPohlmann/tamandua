@@ -142,7 +142,6 @@ export async function runWorkflow(
   const workflowDir = resolveWorkflowDir(workflowId);
   const workflow = await loadWorkflowSpec(workflowDir);
 
-  const db = getDb();
   const now = new Date().toISOString();
   const runId = crypto.randomUUID();
   const runNumber = nextRunNumber();
@@ -216,6 +215,7 @@ export async function runWorkflow(
           cwd: workingDirectoryForHarness,
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
         },
       ).trim();
       // HEAD is not a branch name (detached HEAD), so fall back to empty.
@@ -274,7 +274,7 @@ export async function runWorkflow(
       seededContext.base_branch_sha = execFileSync(
         "git",
         ["rev-parse", "HEAD"],
-        { cwd: workingDirectoryForHarness, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        { cwd: workingDirectoryForHarness, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
       ).trim();
     } catch {
       seededContext.base_branch_sha = "";
@@ -305,8 +305,9 @@ export async function runWorkflow(
 
   // Insert the run record. New runs start with
   // scheduling_status='pending_register' so the daemon control plane
-  // (and/or reconciler) can admit them.
-  db.prepare(
+  // (and/or reconciler) can admit them. getDb() recycles its cached connection after a few
+  // seconds, so creating a large worktree can outlive a handle taken earlier.
+  getDb().prepare(
     `INSERT INTO runs (id, run_number, workflow_id, task, status, context, tokens_spent,
                        scheduling_status, scheduling_requested_at, notify_url, notify_format, max_fix_rounds, max_tokens,
                        created_at, updated_at)
@@ -338,7 +339,7 @@ export async function runWorkflow(
       typeof registration?.body.error === "string"
         ? registration.body.error
         : "daemon registration failed";
-    db.prepare(
+    getDb().prepare(
       "UPDATE runs SET status = 'failed', scheduling_status = NULL, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?",
     ).run(message, runId);
     emitEvent({
@@ -388,8 +389,7 @@ export type ResumeBlockedRunDeps = ResumeRunDeps;
 const DAEMON_RESUME_DEPS: ResumeRunDeps = { ensureDaemon: ensureDaemonControlAvailable, register: registerRunWithDaemon };
 
 export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON_RESUME_DEPS): Promise<ResumeResult> {
-  const db = getDb();
-  const run = db.prepare(
+  const run = getDb().prepare(
     "SELECT id, workflow_id, status, context FROM runs WHERE id = ? AND status = 'failed'",
   ).get(runId) as { id: string; workflow_id: string; status: string; context: string } | undefined;
 
@@ -398,6 +398,8 @@ export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON
   await deps.ensureDaemon();
   validateRunHarnessForScheduling(run.id, run.context);
 
+  // getDb() recycles its cached connection, so a handle must not be held across an await.
+  const db = getDb();
   // Reset the run to running and request fresh scheduling admission.
   const resumeNow = new Date().toISOString();
   db.prepare(
@@ -427,7 +429,7 @@ export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON
       typeof registration?.body.error === "string"
         ? registration.body.error
         : "daemon registration failed";
-    db.prepare(
+    getDb().prepare(
       "UPDATE runs SET status = 'failed', scheduling_status = NULL, scheduling_error = ?, updated_at = datetime('now') WHERE id = ?",
     ).run(message, run.id);
     emitEvent({

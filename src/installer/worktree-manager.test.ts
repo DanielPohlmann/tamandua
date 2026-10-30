@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 
@@ -378,6 +379,29 @@ describe("worktree-manager", () => {
 
       // Clean up
       removeRunWorktree({ runId: "run-validate-001", force: true });
+    });
+
+    it("matches the git-common-dir regardless of path separators", () => {
+      // On Windows git reports "C:/…/.git" from inside the worktree, while
+      // creation resolved the origin's relative ".git" to "C:\…\.git".
+      const runId = `run-validate-separators-${randomUUID()}`;
+      const wt = createRunWorktree({
+        runId,
+        runNumber: 25,
+        workflowId: "test-workflow",
+        worktreeOriginRepository: originRepo,
+      });
+
+      try {
+        const validated = validateRunWorktree(runId, {
+          repo: wt.worktreePath,
+          working_directory_for_harness: wt.worktreePath,
+        });
+
+        assert.equal(validated.runId, runId);
+      } finally {
+        removeRunWorktree({ runId, force: true });
+      }
     });
 
     it("throws when worktree path does not exist", () => {

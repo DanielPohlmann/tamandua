@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import fs from "node:fs";
 import path from "node:path";
-import { resolveTamanduaCli, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
+import { resolveTamanduaCliCommand, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
 import { BASH_RUNNER_AGENT_ID } from "./types.js";
 import { executeBashRound, killProcessTree, recoverStaleBashSteps, schedulableAgents } from "./bash-step.js";
@@ -345,6 +345,7 @@ export async function runPi(
     cwd: options.workdir ?? process.cwd(),
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
     detached: true,
   });
 
@@ -522,6 +523,7 @@ export async function runHermes(
     cwd: options.workdir ?? process.cwd(),
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
     detached: true,
   });
 
@@ -717,6 +719,7 @@ export async function runClaude(
     cwd: options.workdir ?? process.cwd(),
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
     detached: true,
   });
 
@@ -908,7 +911,7 @@ export const STEP_OUTPUT_CONTRACT = [
  *                     via `--run-id` so the CLI only matches steps in this run
  */
 export function buildAgentPrompt(workflowId: string, agentId: string, runId: string): string {
-  const cli = resolveTamanduaCli();
+  const cli = resolveTamanduaCliCommand();
 
   return [
     `You are agent "${agentId}" in workflow "${workflowId}" (run ${runId}).`,
@@ -916,14 +919,14 @@ export function buildAgentPrompt(workflowId: string, agentId: string, runId: str
     `Your job is to poll for work and execute it.`,
     ``,
     `STEP 1 — Check for pending work:`,
-    `Run: "${cli}" step peek "${agentId}" --run-id "${runId}"`,
+    `Run: ${cli} step peek "${agentId}" --run-id "${runId}"`,
     ``,
     `STEP 2 — If NO_WORK:`,
     `Reply HEARTBEAT_OK and stop. Do NOT do anything else.`,
     ``,
     `STEP 3 — If HAS_WORK:`,
     `Claim the step and capture the JSON response:`,
-    `Run: "${cli}" step claim "${agentId}" --run-id "${runId}"`,
+    `Run: ${cli} step claim "${agentId}" --run-id "${runId}"`,
     `The output will be JSON: {"stepId":"<UUID>", "runId":"<UUID>", "input":"<task description>"}`,
     `SAVE the stepId — you MUST use it in step 4.`,
     ``,
@@ -933,8 +936,8 @@ export function buildAgentPrompt(workflowId: string, agentId: string, runId: str
     `STEP 4 — Report results using the SAVED stepId (NOT the agent ID):`,
     `On success: echo 'STATUS: done
 CHANGES: <what you changed>
-TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
-    `On failure: "${cli}" step fail "<stepId>" "<clear reason>"`,
+TESTS: <tests you ran>' | ${cli} step complete "<stepId>"`,
+    `On failure: ${cli} step fail "<stepId>" "<clear reason>"`,
     ``,
     `CRITICAL: You MUST report results using the step complete or step fail commands.`,
     `Failing to report will leave the workflow stuck forever. Always report, even if you`,
@@ -947,7 +950,7 @@ TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
  * Does NOT include step claim — just work execution instructions.
  */
 export function buildWorkPrompt(workflowId: string, agentId: string, runId: string): string {
-  const cli = resolveTamanduaCli();
+  const cli = resolveTamanduaCliCommand();
 
   return [
     `You are agent "${agentId}" in workflow "${workflowId}" (run ${runId}).`,
@@ -961,8 +964,8 @@ export function buildWorkPrompt(workflowId: string, agentId: string, runId: stri
     `When done, report your results using the SAVED stepId (NOT the agent ID):`,
     `On success: echo 'STATUS: done
 CHANGES: <what you changed>
-TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
-    `On failure: "${cli}" step fail "<stepId>" "<reason>"`,
+TESTS: <tests you ran>' | ${cli} step complete "<stepId>"`,
+    `On failure: ${cli} step fail "<stepId>" "<reason>"`,
     ``,
     `CRITICAL: You MUST report results. Do not exit without calling step complete or step fail.`,
   ].join("\n");
@@ -983,7 +986,7 @@ export function buildPollingPrompt(
   runId: string,
   agentPersonaInstructions = "",
 ): string {
-  const cli = resolveTamanduaCli();
+  const cli = resolveTamanduaCliCommand();
 
   const persona = agentPersonaInstructions.trim();
   const prompt = [
@@ -1004,7 +1007,7 @@ export function buildPollingPrompt(
     ``,
     `─── PHASE 1: PEEK ───`,
     `Run this exact command and capture its output:`,
-    `"${cli}" step peek "${agentId}" --run-id "${runId}"`,
+    `${cli} step peek "${agentId}" --run-id "${runId}"`,
     ``,
     `If the output contains NO_WORK:`,
     `  Reply exactly: HEARTBEAT_OK`,
@@ -1015,7 +1018,7 @@ export function buildPollingPrompt(
     ``,
     `─── PHASE 2: CLAIM AND EXECUTE ───`,
     `1. Claim the step and capture the JSON response:`,
-    `   "${cli}" step claim "${agentId}" --run-id "${runId}"`,
+    `   ${cli} step claim "${agentId}" --run-id "${runId}"`,
     `   The output is JSON: {"stepId":"<UUID>", "runId":"<UUID>", "input":"<task description>"}`,
     `   SAVE the stepId — you MUST use it when reporting results.`,
     ``,
@@ -1026,8 +1029,8 @@ export function buildPollingPrompt(
     `4. When finished, report using the SAVED stepId (NOT the agent ID):`,
     `   - Success: echo 'STATUS: done
 CHANGES: <what you did>
-TESTS: <tests you ran>' | "${cli}" step complete "<stepId>"`,
-    `   - Failure: "${cli}" step fail "<stepId>" "<clear reason for failure>"`,
+TESTS: <tests you ran>' | ${cli} step complete "<stepId>"`,
+    `   - Failure: ${cli} step fail "<stepId>" "<clear reason for failure>"`,
     ``,
     STEP_OUTPUT_CONTRACT,
     ``,
