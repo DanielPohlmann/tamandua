@@ -166,6 +166,7 @@ The context for each step is built from:
 | `{{completed_stories}}` | Bullet list of completed stories, or `(none yet)` |
 | `{{stories_remaining}}` | Count of pending + running stories |
 | `{{progress}}` | Contents of `progress-<run_id>.txt` (if the agent maintains one) |
+| `{{progress_file}}` | Absolute path of that progress file, in the loop agent's workspace. Point agents at it instead of a bare `progress-{{run_id}}.txt`: in worktree mode a relative name lands in the run's git worktree, dirties the tree and is never read back |
 | `{{verify_feedback}}` | Feedback from the verify step on retry, else empty |
 
 ### From prior step `KEY: value` outputs

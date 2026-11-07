@@ -273,21 +273,32 @@ export function getAgentWorkspacePath(agentId: string): string | null {
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * Read progress.txt from the loop step's agent workspace.
+ * Absolute path of the run's progress file in the loop agent's workspace, or null
+ * when the run has no loop step or the agent has no workspace. Agents get this
+ * path rather than a relative name: in worktree mode their cwd is the run's git
+ * worktree, where a relative file would dirty the tree and never be read back.
  */
-export function readProgressFile(runId: string): string {
-  const db = getDb();
-  const loopStep = db.prepare(
+export function progressFilePath(runId: string): string | null {
+  const loopStep = getDb().prepare(
     "SELECT agent_id FROM steps WHERE run_id = ? AND type = 'loop' LIMIT 1"
   ).get(runId) as { agent_id: string } | undefined;
-  if (!loopStep) return "(no progress file)";
+  if (!loopStep) return null;
   const workspace = getAgentWorkspacePath(loopStep.agent_id);
-  if (!workspace) return "(no progress file)";
+  return workspace ? path.join(workspace, `progress-${runId}.txt`) : null;
+}
+
+function existingProgressFile(scopedPath: string): string {
+  return fs.existsSync(scopedPath) ? scopedPath : path.join(path.dirname(scopedPath), "progress.txt");
+}
+
+/**
+ * Read the run's progress file (or the legacy progress.txt) from the loop agent's workspace.
+ */
+export function readProgressFile(runId: string): string {
+  const scopedPath = progressFilePath(runId);
+  if (!scopedPath) return "(no progress file)";
   try {
-    const scopedPath = path.join(workspace, `progress-${runId}.txt`);
-    const legacyPath = path.join(workspace, "progress.txt");
-    const filePath = fs.existsSync(scopedPath) ? scopedPath : legacyPath;
-    return fs.readFileSync(filePath, "utf-8");
+    return fs.readFileSync(existingProgressFile(scopedPath), "utf-8");
   } catch {
     return "(no progress yet)";
   }
@@ -356,19 +367,9 @@ export function writeStoryPlanToProgress(runId: string): void {
   if (!runHasStories(runId)) return;
 
   try {
-    const db = getDb();
-    const loopStep = db.prepare(
-      "SELECT agent_id FROM steps WHERE run_id = ? AND type = 'loop' LIMIT 1"
-    ).get(runId) as { agent_id: string } | undefined;
-
-    if (!loopStep) {
-      logger.warn("writeStoryPlanToProgress: no loop step found for run", { runId });
-      return;
-    }
-
-    const workspace = getAgentWorkspacePath(loopStep.agent_id);
-    if (!workspace) {
-      logger.warn("writeStoryPlanToProgress: no workspace configured for loop agent", { runId, agentId: loopStep.agent_id });
+    const scopedPath = progressFilePath(runId);
+    if (!scopedPath) {
+      logger.warn("writeStoryPlanToProgress: no loop step with a configured workspace for run", { runId });
       return;
     }
 
@@ -376,7 +377,6 @@ export function writeStoryPlanToProgress(runId: string): void {
     if (stories.length === 0) return;
 
     const storyPlanSection = buildStoryPlanSection(stories);
-    const scopedPath = path.join(workspace, `progress-${runId}.txt`);
 
     // Read existing content if any
     let existingContent = "";
@@ -1154,6 +1154,7 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
       context["completed_stories"] = formatCompletedStories(allStories);
       context["stories_remaining"] = String(pendingCount);
       context["progress"] = readProgressFile(step.run_id);
+      context["progress_file"] = progressFilePath(step.run_id) ?? "";
 
       if (!context["verify_feedback"]) {
         context["verify_feedback"] = "";
@@ -1205,6 +1206,7 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   ).get(step.run_id) as { cnt: number };
   if (hasStories.cnt > 0) {
     context["progress"] = readProgressFile(step.run_id);
+    context["progress_file"] = progressFilePath(step.run_id) ?? "";
   }
 
   // Clear one-shot timeout_retry after the template has captured it.
@@ -1883,21 +1885,12 @@ export function advancePipeline(runId: string): { advanced: boolean; runComplete
  * Archive the run's progress file to the agent workspace archive directory.
  */
 export function archiveRunProgress(runId: string): void {
-  const db = getDb();
-  const loopStep = db.prepare(
-    "SELECT agent_id FROM steps WHERE run_id = ? AND type = 'loop' LIMIT 1"
-  ).get(runId) as { agent_id: string } | undefined;
-  if (!loopStep) return;
-
-  const workspace = getAgentWorkspacePath(loopStep.agent_id);
-  if (!workspace) return;
-
-  const scopedPath = path.join(workspace, `progress-${runId}.txt`);
-  const legacyPath = path.join(workspace, "progress.txt");
-  const progressPath = fs.existsSync(scopedPath) ? scopedPath : legacyPath;
+  const scopedPath = progressFilePath(runId);
+  if (!scopedPath) return;
+  const progressPath = existingProgressFile(scopedPath);
   if (!fs.existsSync(progressPath)) return;
 
-  const archiveDir = path.join(workspace, "archive", runId);
+  const archiveDir = path.join(path.dirname(scopedPath), "archive", runId);
   fs.mkdirSync(archiveDir, { recursive: true });
   fs.copyFileSync(progressPath, path.join(archiveDir, "progress.txt"));
   fs.unlinkSync(progressPath);
@@ -2140,6 +2133,7 @@ export function resolveStepContext(
     const pendingCount = allStories.filter((s) => s.status === "pending" || s.status === "running").length;
     context["stories_remaining"] = String(pendingCount);
     context["progress"] = readProgressFile(runId);
+    context["progress_file"] = progressFilePath(runId) ?? "";
 
     if (!context["verify_feedback"]) {
       context["verify_feedback"] = "";
