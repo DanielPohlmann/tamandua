@@ -3,9 +3,7 @@ import path from "node:path";
 import os from "node:os";
 
 let _db: DatabaseSync | null = null;
-let _dbOpenedAt = 0;
 let _dbPath: string | null = null;
-const DB_MAX_AGE_MS = 5000;
 
 // Dynamic import to avoid top-level await issues in non-Node22 environments
 import { DatabaseSync } from "node:sqlite";
@@ -17,10 +15,15 @@ function resolveDbPath(): string {
   return path.join(os.homedir(), ".tamandua", "tamandua.db");
 }
 
+/**
+ * The cached connection lives until the database path changes or closeDb() is
+ * called. Callers hold the returned handle across slow work, so it is never
+ * recycled behind their back; WAL mode lets other processes' writes show up
+ * on the same connection.
+ */
 export function getDb(): DatabaseSync {
-  const now = Date.now();
   const dbPath = resolveDbPath();
-  if (_db && _dbPath === dbPath && ((now - _dbOpenedAt) < DB_MAX_AGE_MS || isInTransaction(_db))) return _db;
+  if (_db && _dbPath === dbPath) return _db;
   // Only close if the ref is non-null (avoid double-close warnings)
   if (_db) {
     try {
@@ -34,7 +37,6 @@ export function getDb(): DatabaseSync {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   _db = new DatabaseSync(dbPath);
   _dbPath = dbPath;
-  _dbOpenedAt = now;
   // Agents, the control plane and the CLI write concurrently; wait for a lock
   // instead of failing at once with "database is locked".
   _db.exec("PRAGMA busy_timeout=5000");
@@ -324,7 +326,6 @@ export function closeDb(): void {
     }
     _db = null;
     _dbPath = null;
-    _dbOpenedAt = 0;
   }
 }
 

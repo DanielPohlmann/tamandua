@@ -305,8 +305,7 @@ export async function runWorkflow(
 
   // Insert the run record. New runs start with
   // scheduling_status='pending_register' so the daemon control plane
-  // (and/or reconciler) can admit them. getDb() recycles its cached connection after a few
-  // seconds, so creating a large worktree can outlive a handle taken earlier.
+  // (and/or reconciler) can admit them.
   getDb().prepare(
     `INSERT INTO runs (id, run_number, workflow_id, task, status, context, tokens_spent,
                        scheduling_status, scheduling_requested_at, notify_url, notify_format, max_fix_rounds, max_tokens,
@@ -398,7 +397,6 @@ export async function resumeWorkflow(runId: string, deps: ResumeRunDeps = DAEMON
   await deps.ensureDaemon();
   validateRunHarnessForScheduling(run.id, run.context);
 
-  // getDb() recycles its cached connection, so a handle must not be held across an await.
   const db = getDb();
   // Reset the run to running and request fresh scheduling admission.
   const resumeNow = new Date().toISOString();
