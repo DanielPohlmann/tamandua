@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execSync, execFileSync } from "node:child_process";
-import { getDb } from "../db.js";
+import { getDb, inTransaction } from "../db.js";
 import { resolveWorkflowDir, resolveTamanduaCli } from "./paths.js";
 import { teardownWorkflowCronsIfIdle } from "./agent-scheduler.js";
 import { emitEvent } from "./events.js";
@@ -273,21 +273,32 @@ export function getAgentWorkspacePath(agentId: string): string | null {
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * Read progress.txt from the loop step's agent workspace.
+ * Absolute path of the run's progress file in the loop agent's workspace, or null
+ * when the run has no loop step or the agent has no workspace. Agents get this
+ * path rather than a relative name: in worktree mode their cwd is the run's git
+ * worktree, where a relative file would dirty the tree and never be read back.
  */
-export function readProgressFile(runId: string): string {
-  const db = getDb();
-  const loopStep = db.prepare(
+export function progressFilePath(runId: string): string | null {
+  const loopStep = getDb().prepare(
     "SELECT agent_id FROM steps WHERE run_id = ? AND type = 'loop' LIMIT 1"
   ).get(runId) as { agent_id: string } | undefined;
-  if (!loopStep) return "(no progress file)";
+  if (!loopStep) return null;
   const workspace = getAgentWorkspacePath(loopStep.agent_id);
-  if (!workspace) return "(no progress file)";
+  return workspace ? path.join(workspace, `progress-${runId}.txt`) : null;
+}
+
+function existingProgressFile(scopedPath: string): string {
+  return fs.existsSync(scopedPath) ? scopedPath : path.join(path.dirname(scopedPath), "progress.txt");
+}
+
+/**
+ * Read the run's progress file (or the legacy progress.txt) from the loop agent's workspace.
+ */
+export function readProgressFile(runId: string): string {
+  const scopedPath = progressFilePath(runId);
+  if (!scopedPath) return "(no progress file)";
   try {
-    const scopedPath = path.join(workspace, `progress-${runId}.txt`);
-    const legacyPath = path.join(workspace, "progress.txt");
-    const filePath = fs.existsSync(scopedPath) ? scopedPath : legacyPath;
-    return fs.readFileSync(filePath, "utf-8");
+    return fs.readFileSync(existingProgressFile(scopedPath), "utf-8");
   } catch {
     return "(no progress yet)";
   }
@@ -356,19 +367,9 @@ export function writeStoryPlanToProgress(runId: string): void {
   if (!runHasStories(runId)) return;
 
   try {
-    const db = getDb();
-    const loopStep = db.prepare(
-      "SELECT agent_id FROM steps WHERE run_id = ? AND type = 'loop' LIMIT 1"
-    ).get(runId) as { agent_id: string } | undefined;
-
-    if (!loopStep) {
-      logger.warn("writeStoryPlanToProgress: no loop step found for run", { runId });
-      return;
-    }
-
-    const workspace = getAgentWorkspacePath(loopStep.agent_id);
-    if (!workspace) {
-      logger.warn("writeStoryPlanToProgress: no workspace configured for loop agent", { runId, agentId: loopStep.agent_id });
+    const scopedPath = progressFilePath(runId);
+    if (!scopedPath) {
+      logger.warn("writeStoryPlanToProgress: no loop step with a configured workspace for run", { runId });
       return;
     }
 
@@ -376,7 +377,6 @@ export function writeStoryPlanToProgress(runId: string): void {
     if (stories.length === 0) return;
 
     const storyPlanSection = buildStoryPlanSection(stories);
-    const scopedPath = path.join(workspace, `progress-${runId}.txt`);
 
     // Read existing content if any
     let existingContent = "";
@@ -838,6 +838,7 @@ export function computeHasFrontendChanges(repo: string, branch: string, baseBran
     cwd: repo,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
     timeout: 10_000,
   });
   const refExists = (ref: string) => {
@@ -933,6 +934,18 @@ interface ClaimResult {
 let lastCleanupTime = 0;
 const INTERRUPTED_RUN_OUTPUT = "<re-claim after interrupted run>";
 const CLEANUP_THROTTLE_MS = 5 * 60 * 1000;
+
+type LoopClaimOutcome =
+  | { kind: "lost" }
+  | { kind: "done" }
+  | { kind: "failed"; stepRef: string; message: string; runDetail: string }
+  | { kind: "claimed"; nextStory: any };
+
+function failLoopRun(stepDbId: string, runId: string, output: string): void {
+  const db = getDb();
+  db.prepare("UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?").run(output, stepDbId);
+  db.prepare("UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(runId);
+}
 
 /**
  * Find and claim a pending step for an agent, returning the resolved input.
@@ -1035,81 +1048,80 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   if (step.type === "loop") {
     const loopConfig: LoopConfig | null = step.loop_config ? JSON.parse(step.loop_config) : null;
     if (loopConfig?.over === "stories") {
-      const claim = db.prepare(
-        workerOwnership
-          ? "UPDATE steps SET status = 'running', claim_job_id = ?, claim_pid = ?, claim_pgid = ?, claim_updated_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
-          : "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
-      ).run(
-        ...(workerOwnership ? [workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [step.id])
-      );
-      if ((claim.changes ?? 0) <= 0) return { found: false };
+      // One transaction: a failure between claiming the step and its story would leave the loop
+      // "running" without a story, which reads as waiting for verify, and no agent would claim it.
+      const outcome = inTransaction((): LoopClaimOutcome => {
+        const claim = db.prepare(
+          workerOwnership
+            ? "UPDATE steps SET status = 'running', claim_job_id = ?, claim_pid = ?, claim_pgid = ?, claim_updated_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
+            : "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
+        ).run(
+          ...(workerOwnership ? [workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [step.id])
+        );
+        if ((claim.changes ?? 0) <= 0) return { kind: "lost" };
 
-      if (!runHasStories(step.run_id)) {
-        const message = "Loop cannot run because planning did not produce STORIES_JSON.";
+        if (!runHasStories(step.run_id)) {
+          const message = "Loop cannot run because planning did not produce STORIES_JSON.";
+          failLoopRun(step.id, step.run_id, message);
+          return { kind: "failed", stepRef: step.step_id, message, runDetail: message };
+        }
+
+        const nextStory = db.prepare(
+          "SELECT * FROM stories WHERE run_id = ? AND status = 'pending' ORDER BY story_index ASC LIMIT 1"
+        ).get(step.run_id) as any | undefined;
+
+        if (!nextStory) {
+          const failedStory = db.prepare(
+            "SELECT id FROM stories WHERE run_id = ? AND status = 'failed' LIMIT 1"
+          ).get(step.run_id) as { id: string } | undefined;
+
+          if (failedStory) {
+            failLoopRun(step.id, step.run_id, "Loop cannot continue because one or more stories failed");
+            const detail = "Loop has failed stories and no pending stories";
+            return { kind: "failed", stepRef: step.id, message: detail, runDetail: detail };
+          }
+
+          db.prepare(
+            "UPDATE steps SET status = 'done', updated_at = datetime('now') WHERE id = ?"
+          ).run(step.id);
+          return { kind: "done" };
+        }
+
+        // If another duplicate poller won the story first, undo this loop claim and
+        // let the next polling round inspect current state.
+        const storyClaim = db.prepare(
+          "UPDATE stories SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
+        ).run(nextStory.id);
+        if ((storyClaim.changes ?? 0) <= 0) {
+          db.prepare(
+            "UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+          ).run(step.id);
+          return { kind: "lost" };
+        }
         db.prepare(
-          "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
-        ).run(message, step.id);
-        db.prepare(
-          "UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?"
-        ).run(step.run_id);
+          workerOwnership
+            ? "UPDATE steps SET status = 'running', current_story_id = ?, claim_job_id = ?, claim_pid = ?, claim_pgid = ?, claim_updated_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
+            : "UPDATE steps SET status = 'running', current_story_id = ?, updated_at = datetime('now') WHERE id = ?"
+        ).run(
+          ...(workerOwnership ? [nextStory.id, workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [nextStory.id, step.id])
+        );
+        return { kind: "claimed", nextStory };
+      });
+
+      if (outcome.kind === "lost") return { found: false };
+      if (outcome.kind === "failed") {
         const wfId = getWorkflowId(step.run_id);
-        emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.step_id, agentId, detail: message });
-        emitRunTerminalEvent({ event: "run.failed", runId: step.run_id, workflowId: wfId, detail: message });
+        emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: outcome.stepRef, agentId, detail: outcome.message });
+        emitRunTerminalEvent({ event: "run.failed", runId: step.run_id, workflowId: wfId, detail: outcome.runDetail });
         scheduleRunCronTeardown(step.run_id);
         return { found: false };
       }
-
-      // Find next pending story
-      const nextStory = db.prepare(
-        "SELECT * FROM stories WHERE run_id = ? AND status = 'pending' ORDER BY story_index ASC LIMIT 1"
-      ).get(step.run_id) as any | undefined;
-
-      if (!nextStory) {
-        const failedStory = db.prepare(
-          "SELECT id FROM stories WHERE run_id = ? AND status = 'failed' LIMIT 1"
-        ).get(step.run_id) as { id: string } | undefined;
-
-        if (failedStory) {
-          db.prepare(
-            "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
-          ).run("Loop cannot continue because one or more stories failed", step.id);
-          db.prepare(
-            "UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?"
-          ).run(step.run_id);
-          const wfId = getWorkflowId(step.run_id);
-          emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.id, agentId, detail: "Loop has failed stories and no pending stories" });
-          emitRunTerminalEvent({ event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Loop has failed stories and no pending stories" });
-          scheduleRunCronTeardown(step.run_id);
-          return { found: false };
-        }
-
-        // No pending or failed stories — mark step done and advance
-        db.prepare(
-          "UPDATE steps SET status = 'done', updated_at = datetime('now') WHERE id = ?"
-        ).run(step.id);
+      if (outcome.kind === "done") {
         emitEvent({ ts: new Date().toISOString(), event: "step.done", runId: step.run_id, workflowId: getWorkflowId(step.run_id), stepId: step.step_id, agentId });
         advancePipeline(step.run_id);
         return { found: false };
       }
-
-      // Claim the story. If another duplicate poller won it first, undo this
-      // loop claim and let the next polling round inspect current state.
-      const storyClaim = db.prepare(
-        "UPDATE stories SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
-      ).run(nextStory.id);
-      if ((storyClaim.changes ?? 0) <= 0) {
-        db.prepare(
-          "UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
-        ).run(step.id);
-        return { found: false };
-      }
-      db.prepare(
-        workerOwnership
-          ? "UPDATE steps SET status = 'running', current_story_id = ?, claim_job_id = ?, claim_pid = ?, claim_pgid = ?, claim_updated_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
-          : "UPDATE steps SET status = 'running', current_story_id = ?, updated_at = datetime('now') WHERE id = ?"
-      ).run(
-        ...(workerOwnership ? [nextStory.id, workerOwnership.jobId, workerOwnership.pid, workerOwnership.pgid ?? null, step.id] : [nextStory.id, step.id])
-      );
+      const { nextStory } = outcome;
       const loopRoleRow = db.prepare("SELECT agent_role FROM steps WHERE id = ?").get(step.id) as { agent_role: string | null };
       recordReadOnlyBaseline(step.id, loopRoleRow.agent_role, context["repo"]);
 
@@ -1142,6 +1154,7 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
       context["completed_stories"] = formatCompletedStories(allStories);
       context["stories_remaining"] = String(pendingCount);
       context["progress"] = readProgressFile(step.run_id);
+      context["progress_file"] = progressFilePath(step.run_id) ?? "";
 
       if (!context["verify_feedback"]) {
         context["verify_feedback"] = "";
@@ -1193,6 +1206,7 @@ export function claimStep(agentId: string, runId: string, workerOwnership?: Work
   ).get(step.run_id) as { cnt: number };
   if (hasStories.cnt > 0) {
     context["progress"] = readProgressFile(step.run_id);
+    context["progress_file"] = progressFilePath(step.run_id) ?? "";
   }
 
   // Clear one-shot timeout_retry after the template has captured it.
@@ -1871,21 +1885,12 @@ export function advancePipeline(runId: string): { advanced: boolean; runComplete
  * Archive the run's progress file to the agent workspace archive directory.
  */
 export function archiveRunProgress(runId: string): void {
-  const db = getDb();
-  const loopStep = db.prepare(
-    "SELECT agent_id FROM steps WHERE run_id = ? AND type = 'loop' LIMIT 1"
-  ).get(runId) as { agent_id: string } | undefined;
-  if (!loopStep) return;
-
-  const workspace = getAgentWorkspacePath(loopStep.agent_id);
-  if (!workspace) return;
-
-  const scopedPath = path.join(workspace, `progress-${runId}.txt`);
-  const legacyPath = path.join(workspace, "progress.txt");
-  const progressPath = fs.existsSync(scopedPath) ? scopedPath : legacyPath;
+  const scopedPath = progressFilePath(runId);
+  if (!scopedPath) return;
+  const progressPath = existingProgressFile(scopedPath);
   if (!fs.existsSync(progressPath)) return;
 
-  const archiveDir = path.join(workspace, "archive", runId);
+  const archiveDir = path.join(path.dirname(scopedPath), "archive", runId);
   fs.mkdirSync(archiveDir, { recursive: true });
   fs.copyFileSync(progressPath, path.join(archiveDir, "progress.txt"));
   fs.unlinkSync(progressPath);
@@ -2128,6 +2133,7 @@ export function resolveStepContext(
     const pendingCount = allStories.filter((s) => s.status === "pending" || s.status === "running").length;
     context["stories_remaining"] = String(pendingCount);
     context["progress"] = readProgressFile(runId);
+    context["progress_file"] = progressFilePath(runId) ?? "";
 
     if (!context["verify_feedback"]) {
       context["verify_feedback"] = "";

@@ -82,3 +82,14 @@ export function resolveTamanduaCli(): string {
   // launcher rather than dist/cli/cli.js so Node runtime flags stay centralized.
   return path.resolve(__dirname, "..", "..", "bin", "tamandua");
 }
+
+/**
+ * The CLI invocation agents are told to run. Windows cannot execute the
+ * extensionless sh launcher (it opens the "Select an app" picker), so there the
+ * command runs cli.js through node with the launcher's runtime flags.
+ */
+export function resolveTamanduaCliCommand(platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return `"${resolveTamanduaCli()}"`;
+  const cliJs = path.resolve(__dirname, "..", "cli", "cli.js");
+  return `node --disable-warning=ExperimentalWarning "${cliJs}"`;
+}

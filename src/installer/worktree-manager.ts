@@ -40,6 +40,7 @@ function runGit(
   const result = spawnSync("git", fullArgs, {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   return {
     stdout: (result.stdout ?? "").trim(),
@@ -61,6 +62,20 @@ function gitMustSucceed(
     );
   }
   return result.stdout;
+}
+
+/**
+ * Canonical form of a git-common-dir so the same directory always compares equal.
+ * Git may report it relative or absolute, with either separator on Windows, and the
+ * temp directory may be spelled with 8.3 short names (DANIEL~1.HEL).
+ */
+function canonicalGitCommonDir(gitCommonDir: string, cwd = process.cwd()): string {
+  const absolute = path.resolve(cwd, gitCommonDir);
+  try {
+    return fs.realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
 }
 
 function rowToManagedRunWorktree(
@@ -140,14 +155,10 @@ export function createRunWorktree(
     );
   }
 
-  // Resolve git common dir (normalize to absolute — git may return relative)
-  const gitCommonDirRaw = gitMustSucceed(
-    ["rev-parse", "--git-common-dir"],
+  const gitCommonDir = canonicalGitCommonDir(
+    gitMustSucceed(["rev-parse", "--git-common-dir"], originRepo),
     originRepo,
   );
-  const gitCommonDir = path.isAbsolute(gitCommonDirRaw)
-    ? gitCommonDirRaw
-    : path.resolve(originRepo, gitCommonDirRaw);
 
   // Capture original branch
   const branchResult = runGit(["branch", "--show-current"], originRepo);
@@ -277,15 +288,11 @@ export function validateRunWorktree(
     `Run ${runId} managed worktree is not a git working tree`,
   );
 
-  // Check git-common-dir matches (normalize both — git may return relative or absolute)
-  const actualGitCommonDirRaw = gitMustSucceed(
-    ["rev-parse", "--git-common-dir"],
+  const actualGitCommonDir = canonicalGitCommonDir(
+    gitMustSucceed(["rev-parse", "--git-common-dir"], wt.worktreePath),
     wt.worktreePath,
   );
-  const actualGitCommonDir = path.isAbsolute(actualGitCommonDirRaw)
-    ? actualGitCommonDirRaw
-    : path.resolve(wt.worktreePath, actualGitCommonDirRaw);
-  if (actualGitCommonDir !== wt.worktreeOriginGitCommonDir) {
+  if (actualGitCommonDir !== canonicalGitCommonDir(wt.worktreeOriginGitCommonDir)) {
     throw new Error(
       `Run ${runId} managed worktree git-common-dir mismatch: ` +
         `expected "${wt.worktreeOriginGitCommonDir}", got "${actualGitCommonDir}"`,

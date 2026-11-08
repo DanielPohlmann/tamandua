@@ -255,14 +255,14 @@ steps:
       {{progress}}
 
       Instructions:
-      1. Read progress-{{run_id}}.txt (the Codebase Patterns section first). Pull latest on the branch.
+      1. Read the progress file at {{progress_file}} (the Codebase Patterns section first). Pull latest on the branch.
       2. Extract the PLAN_FILE path from the current story. ALWAYS drive this plan with superpowers:executing-plans — announce it and follow the plan task-by-task, honoring its checkbox (- [ ]) steps and running the verifications it specifies. (If the plan's own header recommends superpowers:subagent-driven-development and subagents are available, follow the plan's guidance.)
       3. Enforce TDD (superpowers:test-driven-development): NO production code without a failing test first. The plan's File Map lists the unit-test files — write them test-first (Red → Green → Refactor). Backend logic never ships without tests.
       4. BEFORE coding each part, list the skills available in your environment and consult the relevant project skill for that domain (skills override training data — see your AGENTS.md). Load only what the current story touches. Respect bounded-context boundaries and ubiquitous language.
       5. If a test fails unexpectedly or a fix does not work on the second attempt, STOP guessing and apply superpowers:systematic-debugging — hypothesize, isolate, verify — before touching more code.
       6. Update the living docs when the change warrants it, per the project CLAUDE.md update rules (e.g. .planning/codebase/ — architecture, structure, stack, conventions, testing — including their Analysis Date). Docs-only edits ride along with the plan's commits.
       7. Commit following the repository's CLAUDE.md commit conventions. One logical change per commit.
-      8. Rewrite progress-{{run_id}}.txt with this plan's results and any reusable patterns.
+      8. Rewrite the progress file at {{progress_file}} with this plan's results and any reusable patterns. It lives outside the repository: never create or commit a progress file in the worktree.
 
       DO NOT run superpowers:finishing-a-development-branch and DO NOT open a PR — this pipeline owns branch completion, CI, and PR in later steps. Stop once this plan's tasks are implemented, its tests pass, and changes are committed.
 

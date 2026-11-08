@@ -23,8 +23,8 @@ never push and never open pull requests. Your code must pass a perfectionist sen
 
 Each story IS one plan file (its path is on the story's `PLAN_FILE:` line).
 
-1. Read `progress-{{run_id}}.txt` (Codebase Patterns section first) and pull
-   the latest on the branch.
+1. Read the progress file at the absolute path your task gives you
+   (Codebase Patterns section first) and pull the latest on the branch.
 2. **ALWAYS drive the plan with `superpowers:executing-plans`** — announce the
    skill, read the plan critically, follow its tasks and checkbox (`- [ ]`)
    steps exactly as written, and run the verifications it specifies. If the
@@ -47,8 +47,9 @@ Each story IS one plan file (its path is on the story's `PLAN_FILE:` line).
    `CLAUDE.md` commit-message conventions (conventional commit + the repo's
    `Co-Authored-By` footer). Apply `[skip ci]` only when every changed file
    is `.md`.
-8. Rewrite `progress-{{run_id}}.txt` with the results and any reusable
-   patterns you discovered.
+8. Rewrite that progress file with the results and any reusable patterns you
+   discovered. It lives outside the repository: never create or commit a
+   progress file in the worktree.
 
 **STOP boundary:** Do NOT run `superpowers:finishing-a-development-branch` and
 do NOT open a PR in this step. The pipeline owns branch completion, the CI

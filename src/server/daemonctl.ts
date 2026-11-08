@@ -338,6 +338,7 @@ export async function startDaemon(port = 3334, opts?: StartOptions): Promise<{ p
 
     const daemonScript = path.resolve(__dirname, "daemon.js");
     const spawnOpts: Parameters<typeof spawn>[2] = {
+      windowsHide: true,
       detached: true,
       stdio: ["ignore", out, errFd],
     };
@@ -525,6 +526,7 @@ export async function startMcp(port?: number, opts?: StartOptions): Promise<{ pi
 
   const standaloneScript = resolveStandaloneScript();
   const spawnOpts: Parameters<typeof spawn>[2] = {
+    windowsHide: true,
     detached: true,
     stdio: ["ignore", out, errFd],
   };
@@ -811,6 +813,7 @@ export async function startControlPlane(port?: number, opts?: StartOptions): Pro
 
   const standaloneScript = resolveControlStandaloneScript();
   const spawnOpts: Parameters<typeof spawn>[2] = {
+    windowsHide: true,
     detached: true,
     stdio: ["ignore", out, errFd],
   };

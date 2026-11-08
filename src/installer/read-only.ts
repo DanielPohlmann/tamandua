@@ -41,6 +41,7 @@ function git(cwd: string, args: string[], options: GitOptions = {}): string {
     cwd,
     encoding: "utf-8",
     stdio: "pipe",
+    windowsHide: true,
     timeout: options.timeout ?? 60_000,
     input: options.input,
     env: options.env ? { ...process.env, ...options.env } : process.env,
@@ -48,7 +49,7 @@ function git(cwd: string, args: string[], options: GitOptions = {}): string {
 }
 
 function gitBuffer(cwd: string, args: string[]): Buffer {
-  return execFileSync("git", ["--literal-pathspecs", ...args], { cwd, stdio: "pipe", timeout: 60_000, maxBuffer: 256 * 1024 * 1024 });
+  return execFileSync("git", ["--literal-pathspecs", ...args], { cwd, stdio: "pipe", timeout: 60_000, maxBuffer: 256 * 1024 * 1024, windowsHide: true });
 }
 
 interface StatusEntry {

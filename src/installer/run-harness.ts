@@ -36,6 +36,7 @@ function readCurrentGitBranch(workdir: string): string {
   const result = spawnSync("git", ["-C", workdir, "branch", "--show-current"], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
 
   if (result.status !== 0) {

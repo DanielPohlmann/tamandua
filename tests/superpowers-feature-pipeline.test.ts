@@ -9,7 +9,7 @@ import { useTempTamanduaHome, type TempTamanduaHome } from "./helpers/temp-db.ts
 import { getDb, closeDb } from "../dist/db.js";
 import { installWorkflow } from "../dist/installer/install.js";
 import { loadWorkflowSpec } from "../dist/installer/workflow-spec.js";
-import { resolveWorkflowDir } from "../dist/installer/paths.js";
+import { resolveTamanduaCliCommand, resolveWorkflowDir } from "../dist/installer/paths.js";
 import { insertRunSteps, buildEngineContextDefaults, resumeBlockedRun } from "../dist/installer/run.js";
 import { advancePipeline } from "../dist/installer/step-ops.js";
 import { executePollingRound } from "../dist/installer/agent-scheduler.js";
@@ -275,10 +275,10 @@ describe("superpowers-feature pipeline with a fake claude", { timeout: 2_400_000
     for (const writer of ["setup", "developer", "pr"]) {
       assert.ok(!invocationFor(h.log, writer).argv.includes("--disallowedTools"), `${writer} keeps its edit tools`);
     }
-    const launcher = path.join(ROOT, "bin", "tamandua");
+    const cliCommand = resolveTamanduaCliCommand();
     for (const { prompt } of invocations(h.log)) {
       assert.ok(prompt.includes("STEP OUTPUT CONTRACT"), "the prompt embeds the step output contract");
-      assert.ok(prompt.includes(`"${launcher}" step peek`), "the prompt calls the launcher directly");
+      assert.ok(prompt.includes(`${cliCommand} step peek`), "the prompt calls the platform's CLI command");
       assert.doesNotMatch(prompt, /\bnode\s+"[^"]*tamandua"/, "the launcher is not prefixed with node");
     }
     assert.match(invocationFor(h.log, "reviewer").prompt, /# Review Verifier/, "the persona reaches claude through the prompt");

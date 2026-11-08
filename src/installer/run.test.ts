@@ -1,4 +1,4 @@
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -343,6 +343,41 @@ describe("runWorkflow", () => {
       assert.equal(ctx.worktree_origin_ref, "main");
       assert.equal(ctx.base_branch, "main");
       assert.notEqual(path.resolve(ctx.repo), path.resolve(originDir), "the run must not operate on the origin checkout");
+    });
+  });
+
+  describe("database connection lifetime", () => {
+    it("records the run even when the cached connection expires during worktree creation", async () => {
+      const workflowId = "test-db-expiry";
+      writeMinimalWorkflow(tempHome, workflowId, "worktree");
+      const originDir = path.join(tempHome, "db-expiry-origin");
+      initGitRepo(originDir);
+
+      // Time jumps 6 s once the worktree exists, as when `git worktree add` on a large
+      // repository outlasts getDb()'s 5 s connection lifetime.
+      const realNow = Date.now.bind(Date);
+      const worktreeRoot = process.env.TAMANDUA_WORKTREE_ROOT!;
+      let offsetMs = 0;
+      const nowMock = mock.method(Date, "now", () => {
+        if (offsetMs === 0 && fs.existsSync(worktreeRoot)) offsetMs = 6000;
+        return realNow() + offsetMs;
+      });
+      try {
+        await runWorkflow({
+          workflowId,
+          taskTitle: "db expiry",
+          worktreeOriginRepository: originDir,
+          worktreeOriginRef: "main",
+        });
+      } catch (err) {
+        assert.doesNotMatch((err as Error).message, /database is not open/);
+      } finally {
+        nowMock.mock.restore();
+      }
+
+      const { getDb } = await import("../../dist/db.js");
+      const row = getDb().prepare("SELECT id FROM runs WHERE workflow_id = ?").get(workflowId);
+      assert.ok(row, "run record should exist");
     });
   });
 
