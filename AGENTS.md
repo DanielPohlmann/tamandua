@@ -110,11 +110,12 @@ Tamandua is an agent team orchestrator built on top of pi (the coding agent CLI)
 
 The agent scheduler uses in-memory `setInterval` timers (not OS cron) to poll agents:
 
-1. Polling phase: cheap model checks `step peek` → HAS_WORK or NO_WORK
+1. Polling phase: for run-scoped jobs the scheduler runs `peekStep()` in-process first and skips the round on NO_WORK, so no harness is launched (no plugins, MCP servers or model turn) when the agent has nothing pending. Otherwise the agent's prompt still starts with `step peek` → HAS_WORK or NO_WORK
 2. Work phase: if HAS_WORK, spawns `pi --print` with the agent's workspace and prompt
 3. `runPi` emits lifecycle logs (`pi pre-launch`, `pi launched`, `pi completed`/`pi execution failed`) with PID, timing, and bounded stream preview metadata for observability without dumping full prompts or large stderr payloads
 4. `executePollingRound` emits stage logs (`Polling round skipped/start/complete/failed`) with shared round context (`jobId`, `agentId`, timeout/workdir/model when available) and bounded outcome/error previews
 5. Polling rounds run pi in JSON mode (`--mode json`) so scheduler logic can extract `message_end.message.usage` token metadata and attribute increments to `runs.tokens_spent` using run IDs parsed from tool outputs (with step-id fallback).
+   When the output names no run or step (claude's JSON result never does), a run-scoped job's own `runId` owns the tokens; only heartbeat rounds and jobs without a run go to system spend.
 6. Successful token attribution emits a `run.tokens.updated` event (`tokenDelta` + `tokensSpent` fields); terminal run lifecycle events (`run.completed`/`run.failed`) also carry `tokensSpent` for cost visibility.
 
 ### Step Lifecycle

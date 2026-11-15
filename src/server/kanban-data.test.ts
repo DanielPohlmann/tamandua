@@ -8,6 +8,7 @@ import {
   buildKanbanCardDetail,
   laneAgentSuffix,
   normaliseStatus,
+  stepDisplayName,
 } from "../../dist/server/kanban-data.js";
 
 function seedDb(): DatabaseSync {
@@ -153,6 +154,29 @@ describe("kanban-data: laneAgentSuffix", () => {
   });
   it("falls back to the whole id when no underscore is present", () => {
     assert.equal(laneAgentSuffix("solo"), "solo");
+  });
+});
+
+describe("kanban-data: bash step names", () => {
+  it("names bash steps after the step, other steps after the agent", () => {
+    assert.equal(stepDisplayName("wf_bash-runner", "gate-unit"), "gate-unit");
+    assert.equal(stepDisplayName("bash-runner", "gate-ci-local"), "gate-ci-local");
+    assert.equal(stepDisplayName("wf_reviewer", "gate-review"), "reviewer");
+  });
+
+  it("labels bash lanes and cards with the gate instead of Bash runner", () => {
+    const db = seedDb();
+    insertRun(db, "rb", "running");
+    insertStep(db, "rb", "gate-unit", "bash-runner", 0, "done");
+    insertStep(db, "rb", "gate-review", "wf_reviewer", 1, "waiting");
+    const snap = buildKanbanSnapshot(db, "rb");
+    assert.ok(snap);
+    assert.equal(snap.lanes[0].agent, "bash-runner");
+    assert.equal(snap.lanes[0].label, "Gate unit");
+    assert.equal(snap.lanes[0].cards[0].title, "Gate unit");
+    assert.equal(snap.lanes[1].label, "Reviewer");
+    assert.equal(snap.lanes[1].cards[0].title, "Reviewer step");
+    assert.equal(buildKanbanCardDetail(db, "rb", "gate-unit")?.title, "gate-unit");
   });
 });
 

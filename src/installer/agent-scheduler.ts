@@ -1133,7 +1133,7 @@ interface PollingIdentifierHints {
   stepId: string | null;
 }
 
-type RunIdSource = "metadata_run_id" | "step_lookup" | "none";
+type RunIdSource = "metadata_run_id" | "step_lookup" | "job_run_id" | "none";
 
 interface ResolvedRunId {
   runId: string | null;
@@ -1535,7 +1535,12 @@ async function attributePollingRoundTokenUsage(
     return;
   }
 
-  const resolved = await resolveRunIdForAttribution(metadata);
+  let resolved = await resolveRunIdForAttribution(metadata);
+  // Polling jobs are run-scoped, so the job's own run is the right owner when
+  // the output names neither a run nor a step (claude's JSON result does not).
+  if (!resolved.runId && typeof context.runId === "string" && context.runId) {
+    resolved = { runId: context.runId, source: "job_run_id" };
+  }
   if (!resolved.runId) {
     logger.warn("Polling round token usage not attributed to run — run id unresolved", {
       ...context,
@@ -1777,6 +1782,24 @@ export async function executePollingRound(
   }
 
   try {
+    // ── Pre-launch peek ────────────────────────────────────────────
+    // The polling prompt's first step is `step peek`, and on NO_WORK the
+    // agent just replies HEARTBEAT_OK. Asking the database here skips that
+    // whole harness launch (plugins, MCP servers, a paid model turn) on the
+    // rounds that would find nothing.
+    if (job.runId) try {
+      const { peekStep } = await import("./step-ops.js");
+      if (peekStep(job.agentId, job.runId) === "NO_WORK") {
+        logger.debug("Polling round skipped — no pending work", { ...context, reason: "no_work" });
+        return;
+      }
+    } catch (err) {
+      logger.warn("Pre-launch peek failed; launching the harness anyway", {
+        ...context,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     let agentPersonaInstructions = "";
     try {
       agentPersonaInstructions = await buildAgentPersonaInstructions(job.agentId);

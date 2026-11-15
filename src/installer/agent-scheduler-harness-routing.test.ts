@@ -54,6 +54,14 @@ function makeWorkflow(overrides: Partial<WorkflowSpec> = {}): WorkflowSpec {
   };
 }
 
+/** The scheduler only launches a harness when the agent has a pending step (pre-launch peek). */
+function seedPendingStep(db: ReturnType<typeof getDb>, runId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, created_at, updated_at) VALUES (?, ?, 'work', 'test-wf_test-agent', 0, '', '', 'pending', ?, ?)",
+  ).run(`${runId}-step`, runId, now, now);
+}
+
 describe("buildPollingRoundContext harnessType", () => {
   it("includes harnessType in returned context", () => {
     const job: CronJobInfo = {
@@ -171,6 +179,7 @@ describe("executePollingRound harness dispatch", () => {
       harness_type: "pi",
       working_directory_for_harness: workdir,
     }), nowPiDispatch, nowPiDispatch);
+    seedPendingStep(db, runId);
 
     const workflow = makeWorkflow();
     const result = await createAgentCronJob({
@@ -215,6 +224,7 @@ describe("executePollingRound harness dispatch", () => {
       harness_type: "hermes",
       working_directory_for_harness: workdir,
     }), nowHermes, nowHermes);
+    seedPendingStep(db, runId);
 
     const workflow = makeWorkflow();
     const result = await createAgentCronJob({
@@ -253,6 +263,7 @@ describe("executePollingRound harness dispatch", () => {
       working_directory_for_harness: workdir,
       // no harness_type
     }), nowDefault, nowDefault);
+    seedPendingStep(db, runId);
 
     const workflow = makeWorkflow();
     const result = await createAgentCronJob({
@@ -290,6 +301,7 @@ describe("executePollingRound harness dispatch", () => {
       harness_type: "claude",
       working_directory_for_harness: workdir,
     }), now, now);
+    seedPendingStep(db, runId);
 
     const workflow = makeWorkflow();
     const result = await createAgentCronJob({
@@ -331,6 +343,7 @@ describe("executePollingRound harness dispatch", () => {
       harness_type: "hermes",
       working_directory_for_harness: workdir,
     }), nowHermesEnv, nowHermesEnv);
+    seedPendingStep(db, runId);
 
     const workflow = makeWorkflow();
     const result = await createAgentCronJob({
@@ -355,6 +368,40 @@ describe("executePollingRound harness dispatch", () => {
 
     await removeRunCrons(runId);
   });
+  it("does not launch the harness when the agent has no pending step", async () => {
+    const workdir = path.join(tempHome, "work");
+    fs.mkdirSync(workdir, { recursive: true });
+    const runId = "run-no-work";
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.prepare(
+      "INSERT INTO runs (id, workflow_id, task, status, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(runId, "test-wf", "test task", "running", JSON.stringify({ working_directory_for_harness: workdir }), now, now);
+    const job = { id: "job-no-work", workflowId: "test-wf", runId, agentId: "test-wf_test-agent", intervalMinutes: 5, harnessType: "claude" as const, workingDirectoryForHarness: workdir, createdAt: "" };
+    await executePollingRound(job, makeAgent(), makeWorkflow());
+    assert.equal(fs.existsSync(path.join(tempHome, "claude-args.log")), false, "claude should not be launched without pending work");
+  });
+
+  it("attributes claude round tokens to the job's run when the output names no run", async () => {
+    const workdir = path.join(tempHome, "work");
+    fs.mkdirSync(workdir, { recursive: true });
+    const claudePath = path.join(tempHome, "claude-work");
+    makeMockBinary(claudePath, `printf '{"type":"result","result":"Working on it, nothing to report yet.","usage":{"input_tokens":30,"output_tokens":12}}'`);
+    process.env.TAMANDUA_CLAUDE_BINARY = claudePath;
+    const runId = "run-claude-tokens";
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.prepare(
+      "INSERT INTO runs (id, workflow_id, task, status, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(runId, "test-wf", "test task", "running", JSON.stringify({ working_directory_for_harness: workdir }), now, now);
+    seedPendingStep(db, runId);
+    const job = { id: "job-claude-tokens", workflowId: "test-wf", runId, agentId: "test-wf_test-agent", intervalMinutes: 5, harnessType: "claude" as const, workingDirectoryForHarness: workdir, createdAt: "" };
+    await executePollingRound(job, makeAgent(), makeWorkflow());
+    const row = db.prepare("SELECT tokens_spent FROM runs WHERE id = ?").get(runId) as { tokens_spent: number };
+    assert.ok(row.tokens_spent > 0, `run tokens_spent should grow, got ${row.tokens_spent}`);
+    await removeRunCrons(runId);
+  });
+
 });
 
 describe("createAgentCronJob harnessType from run context", () => {
