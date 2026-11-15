@@ -21,19 +21,19 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import crypto from "node:crypto";
 import { logger } from "../lib/logger.js";
 import { getDb } from "../db.js";
 import { emitEvent } from "../installer/events.js";
 import { validateRunHarnessForScheduling } from "../installer/run-harness.js";
 import { clearRateLimitMarker } from "../installer/rate-limit.js";
+import { homeDir } from "../lib/home-dir.js";
 
 export const DEFAULT_CONTROL_PORT = 3339;
 const DEFAULT_MAX_ACTIVE_TIMERS = 50;
 
 function defaultDaemonSecretFile(): string {
-  return path.join(process.env.HOME?.trim() || os.homedir(), ".tamandua", "daemon-secret");
+  return path.join(homeDir(), ".tamandua", "daemon-secret");
 }
 
 export function getControlPort(): number {

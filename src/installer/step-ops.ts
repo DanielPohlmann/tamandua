@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { execSync, execFileSync } from "node:child_process";
 import { getDb, inTransaction } from "../db.js";
 import { resolveWorkflowDir, resolveTamanduaCli } from "./paths.js";
@@ -27,6 +26,7 @@ import { parseFindingsJson } from "./findings.js";
 import { detectOpenedPr } from "./notifications.js";
 import { enforceReadOnly, recordReadOnlyBaseline } from "./read-only.js";
 import { RATE_LIMIT_PAUSES_KEY, RATE_LIMIT_RESUME_KEY, resetRateLimitPauses } from "./rate-limit.js";
+import { homeDir } from "../lib/home-dir.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Key-Value Parsing
@@ -257,7 +257,7 @@ function emitRunTerminalEvent(params: {
  */
 export function getAgentWorkspacePath(agentId: string): string | null {
   try {
-    const configPath = path.join(os.homedir(), ".tamandua", "agents.json");
+    const configPath = path.join(homeDir(), ".tamandua", "agents.json");
     const raw = fs.readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw);
     const agents: Array<{ id: string; workspace?: string }> = Array.isArray(config) ? config : [];

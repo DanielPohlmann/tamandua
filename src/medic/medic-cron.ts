@@ -6,14 +6,14 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { resolveTamanduaCliCommand } from "../installer/paths.js";
+import { homeDir } from "../lib/home-dir.js";
 import {
   createAgentCronJob,
   removeAgentCrons,
 } from "../installer/agent-scheduler.js";
 
-const MEDIC_CRON_FILE = path.join(os.homedir(), ".tamandua", "medic-cron.json");
+const MEDIC_CRON_FILE = path.join(homeDir(), ".tamandua", "medic-cron.json");
 const MEDIC_AGENT_ID = "tamandua-medic";
 const MEDIC_INTERVAL_MINUTES = 15;
 
@@ -102,7 +102,7 @@ export async function installMedicCron(): Promise<{ ok: boolean; error?: string 
 
   // Ensure the tamandua-medic agent entry exists in agents.json
   try {
-    const agentsPath = path.join(os.homedir(), ".tamandua", "agents.json");
+    const agentsPath = path.join(homeDir(), ".tamandua", "agents.json");
     const agentsDir = path.dirname(agentsPath);
     fs.mkdirSync(agentsDir, { recursive: true });
 
@@ -122,8 +122,8 @@ export async function installMedicCron(): Promise<{ ok: boolean; error?: string 
         id: MEDIC_AGENT_ID,
         name: "Tamandua Medic",
         model: "default",
-        workspace: path.join(os.homedir(), ".tamandua", "workspaces", MEDIC_AGENT_ID),
-        agentDir: path.join(os.homedir(), ".tamandua", "agents", MEDIC_AGENT_ID),
+        workspace: path.join(homeDir(), ".tamandua", "workspaces", MEDIC_AGENT_ID),
+        agentDir: path.join(homeDir(), ".tamandua", "agents", MEDIC_AGENT_ID),
         config: {
           role: "analysis",
           description: "Health watchdog for tamandua workflow runs",
@@ -160,7 +160,7 @@ export async function uninstallMedicCron(): Promise<{ ok: boolean; error?: strin
 
   // Remove medic agent from agents.json
   try {
-    const agentsPath = path.join(os.homedir(), ".tamandua", "agents.json");
+    const agentsPath = path.join(homeDir(), ".tamandua", "agents.json");
     if (fs.existsSync(agentsPath)) {
       const raw = fs.readFileSync(agentsPath, "utf-8");
       let agents = JSON.parse(raw);

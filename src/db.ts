@@ -1,18 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 
 let _db: DatabaseSync | null = null;
 let _dbPath: string | null = null;
 
 // Dynamic import to avoid top-level await issues in non-Node22 environments
 import { DatabaseSync } from "node:sqlite";
+import { homeDir } from "./lib/home-dir.js";
 
 function resolveDbPath(): string {
   const explicit = process.env.TAMANDUA_DB_PATH?.trim();
   if (explicit) return path.resolve(explicit);
 
-  return path.join(os.homedir(), ".tamandua", "tamandua.db");
+  return path.join(homeDir(), ".tamandua", "tamandua.db");
 }
 
 /**

@@ -1,7 +1,7 @@
-import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { homeDir } from "../lib/home-dir.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,19 +38,19 @@ export function resolveBundledWorkflowDir(workflowId: string): string {
 export function resolvePiStateDir(): string {
   const env = process.env.TAMANDUA_STATE_DIR?.trim();
   if (env) return env;
-  return path.join(os.homedir(), ".tamandua");
+  return path.join(homeDir(), ".tamandua");
 }
 
 export function resolvePiConfigPath(): string {
   const env = process.env.PI_SETTINGS_PATH?.trim();
   if (env) return env;
-  return path.join(os.homedir(), ".pi", "agent", "settings.json");
+  return path.join(homeDir(), ".pi", "agent", "settings.json");
 }
 
 export function resolvePiAuthPath(): string {
   const env = process.env.PI_AUTH_PATH?.trim();
   if (env) return env;
-  return path.join(os.homedir(), ".pi", "agent", "auth.json");
+  return path.join(homeDir(), ".pi", "agent", "auth.json");
 }
 
 export function resolveTamanduaRoot(): string {

@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { createHash } from "node:crypto";
 import { getDb } from "../db.js";
+import { homeDir } from "../lib/home-dir.js";
 
 // ── Types ──
 
@@ -99,7 +99,7 @@ function rowToManagedRunWorktree(
 export function resolveWorktreeRoot(): string {
   const env = process.env.TAMANDUA_WORKTREE_ROOT?.trim();
   if (env) return path.resolve(env);
-  return path.join(os.homedir(), ".tamandua", "worktrees");
+  return path.join(homeDir(), ".tamandua", "worktrees");
 }
 
 export function buildWorktreePath(params: {

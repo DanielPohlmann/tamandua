@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { resolveTamanduaCli, resolvePiStateDir } from "./paths.js";
+import { homeDir } from "../lib/home-dir.js";
 
 /**
  * Ensure the tamandua CLI is symlinked into a directory on the user's PATH.
@@ -68,7 +68,7 @@ function resolveBinDir(): string {
   const envDir = process.env.TAMANDUA_BIN_DIR?.trim();
   if (envDir) return envDir;
 
-  const localBin = path.join(os.homedir(), ".local", "bin");
+  const localBin = path.join(homeDir(), ".local", "bin");
   // Prefer ~/.local/bin if it exists, otherwise use it anyway (we'll create it)
   try {
     fs.accessSync(localBin, fs.constants.W_OK);

@@ -8,7 +8,7 @@
 import { getDb } from "../db.js";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { homeDir } from "../lib/home-dir.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ export function checkOrphanedCrons(): OrphanedCron[] {
 
   try {
     // Read cron jobs config
-    const cronFile = path.join(os.homedir(), ".tamandua", "cron-jobs.json");
+    const cronFile = path.join(homeDir(), ".tamandua", "cron-jobs.json");
     let cronJobs: Array<{ id: string; workflowId: string; name: string }> = [];
 
     try {

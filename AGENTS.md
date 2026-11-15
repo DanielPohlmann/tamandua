@@ -78,7 +78,9 @@ tamandua/
 │   └── lib/
 │       ├── logger.ts             # File logging
 │       ├── logger.test.ts        # Logger tests
-│       └── frontend-detect.ts    # Frontend file detection
+│       ├── frontend-detect.ts    # Frontend file detection
+│       ├── home-dir.ts           # homeDir(): HOME-aware home resolution (use instead of os.homedir())
+│       └── posix-shell.ts        # Git Bash discovery; runs .sh scripts on Windows without cmd's "open with"
 ├── workflows/                    # Bundled workflow definitions (worktree variants symlink agent dirs)
 ├── agents/shared/                # Shared agent personas (setup, pr, verifier — symlinked into workflows)
 ├── skills/                       # Bundled skills
@@ -256,6 +258,17 @@ Tamandua is often used to develop and test itself. All tests use isolated tempor
 - **Temp HOME isolation:** Use `fs.mkdtempSync()` for temporary HOME directories, pass `HOME` env to spawned subprocesses, clean up in `finally` blocks. Helpers that run CLI must use an explicit isolated env — do not fall back to `process.env`.
 - **Scoped daemon control:** Pass `{ homeDir: tempHome }` or stop the exact child process handle created by the test. Never call lifecycle functions against real HOME; verify any PID belongs to the test environment before killing it.
 - **Guard coverage:** `tests/test-isolation-guard.test.ts` scans for patterns that can touch the live daemon. Update it when adding new service lifecycle tests.
+- **Resolve home with `homeDir()`, never `os.homedir()`.** `os.homedir()` reads `USERPROFILE` on Windows and ignores `HOME`, so on Windows code using it escaped the test's temp `HOME`: tests wrote the real `~/.tamandua` (pid/port files), `daemonctl` waited for pid files the daemons wrote elsewhere (hangs), and the daemons stayed alive as orphans. `homeDir()` (`src/lib/home-dir.ts`) is `HOME || os.homedir()`, identical on POSIX.
+- **Stop every daemon a test brings up.** Starting a run (CLI or MCP `tamandua.run.start`) also starts the dashboard daemon; stop it (`dashboard stop`) in `finally` along with MCP / control plane. POSIX-only `after()` sweeps (`pgrep`, `/proc`) do nothing on Windows.
+- **Ownership checks need a Windows path.** `/proc/<pid>/environ` exists only on Linux. `daemonctl`'s `processHomeMatches()` falls back on Windows to the process command line (tamandua server script + a port recorded in that home's port files); without it, `stop*({ homeDir })` refused to kill test daemons.
+- **No `.sh` through `cmd.exe`.** `shell: true` on Windows runs cmd, which opens the "How do you want to open this file?" dialog for a `.sh` path. Pass shell commands through `windowsShellCommand()` (`src/lib/posix-shell.ts`), which hands `.sh` scripts to Git Bash (never the WSL `System32\bash.exe`; override with `TAMANDUA_BASH`).
+
+### Windows Process Spawning
+
+- **Never pass `detached: true` on Windows** to a process that runs other console programs (agents, shells). There it means `DETACHED_PROCESS`: the child gets no console, so every console tool it starts (node, bash, git, npm) opens a new visible window, and `windowsHide` only covers the direct child. Use `detached: process.platform !== "win32"` and kill trees with `killProcessTree()` (`taskkill /T /F`) from `src/installer/bash-step.ts`. Long-lived daemons spawned from the CLI (`daemonctl.ts`) stay detached so they outlive the CLI.
+- **Pass `windowsHide: true` on every spawn** that can run inside the daemon (git, version checks, hooks): the daemon has no console, so each unhidden child flashes a window.
+- **Non-detached children die with their parent on Windows** (libuv puts them in a kill-on-close job object), so agents now die when the daemon stops. Descendants that escape that job (spawned detached) are killed by `reapOrphanedDescendants()` when the agent exits.
+- **`child.kill()` on Windows kills only the direct child**, not a shell's children; use `killProcessTree()` for timeouts.
 
 `npm test` remains a convenience alias that runs the full parallel suite.
 

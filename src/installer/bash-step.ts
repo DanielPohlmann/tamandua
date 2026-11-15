@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { getDb } from "../db.js";
 import { logger } from "../lib/logger.js";
+import { windowsShellCommand } from "../lib/posix-shell.js";
 import { claimStep, completeBashStep, parseDeclaredContextKeys, recoverOrphanedStepsForAgent, resolveStepContext } from "./step-ops.js";
 import { BASH_ENV_KEYS_CONTEXT_KEY, BASH_RUNNER_AGENT_ID, type WorkflowAgent, type WorkflowSpec } from "./types.js";
 
@@ -85,10 +86,46 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals = "SIGKILL")
   return undefined;
 }
 
+/**
+ * PowerShell script that kills what a finished process left behind. Windows
+ * keeps no process groups, and taskkill /T cannot walk a tree whose root has
+ * exited, so the tree is rebuilt from ParentProcessId. Only processes created
+ * after the root started are followed, so a PID reused by an unrelated older
+ * process never matches.
+ */
+export function buildOrphanReapScript(rootPid: number, startedAtMs: number): string {
+  return [
+    `$root = ${Math.trunc(rootPid)}; $since = ${Math.trunc(startedAtMs)}; $self = $PID`,
+    "$all = @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -and ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() -ge $since })",
+    "$set = @{ $root = $true }; $hits = @(); $grew = $true",
+    "while ($grew) { $grew = $false; foreach ($p in $all) { if ($set.ContainsKey([int]$p.ParentProcessId) -and -not $set.ContainsKey([int]$p.ProcessId) -and $p.ProcessId -ne $self) { $set[[int]$p.ProcessId] = $true; $hits += [int]$p.ProcessId; $grew = $true } } }",
+    "foreach ($id in $hits) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }",
+  ].join("; ");
+}
+
+/**
+ * Windows only: kill the descendants a process left running after it exited
+ * (dev servers, watchers, background shells), which otherwise keep their
+ * consoles open and burn CPU. Fire-and-forget; no-op on POSIX.
+ */
+export function reapOrphanedDescendants(rootPid: number | undefined, startedAtMs: number): void {
+  if (process.platform !== "win32" || !rootPid) return;
+  try {
+    const reaper = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", buildOrphanReapScript(rootPid, startedAtMs)],
+      { stdio: "ignore", windowsHide: true },
+    );
+    reaper.on("error", () => {});
+  } catch {
+    // best effort
+  }
+}
+
 export function runBashCommand(command: string, options: BashRunOptions): Promise<BashResult> {
   return new Promise((resolve) => {
     const cap = options.maxOutputChars ?? MAX_OUTPUT_CHARS;
-    const child = spawn(command, {
+    const child = spawn(windowsShellCommand(command), {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       shell: true,

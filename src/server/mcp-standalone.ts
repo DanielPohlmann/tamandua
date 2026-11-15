@@ -17,7 +17,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { homeDir } from "../lib/home-dir.js";
 import {
   DEFAULT_MCP_PORT,
   startTamanduaMcpServer,
@@ -25,8 +25,8 @@ import {
   type TamanduaMcpServer,
 } from "./mcp-server.js";
 
-const MCP_PID_FILE = path.join(os.homedir(), ".tamandua", "mcp.pid");
-const MCP_PORT_FILE = path.join(os.homedir(), ".tamandua", "mcp-port");
+const MCP_PID_FILE = path.join(homeDir(), ".tamandua", "mcp.pid");
+const MCP_PORT_FILE = path.join(homeDir(), ".tamandua", "mcp-port");
 
 function resolvePort(): number {
   // 1. CLI argument

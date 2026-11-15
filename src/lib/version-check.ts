@@ -21,7 +21,7 @@ function execFileAsync(
   cwd: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { cwd, timeout: 30_000 }, (error, stdout) => {
+    execFile(command, args, { cwd, timeout: 30_000, windowsHide: true }, (error, stdout) => {
       if (error) return reject(error);
       resolve(stdout.trim());
     });

@@ -457,6 +457,9 @@ describe("MCP lifecycle integration", { concurrency: 1 }, () => {
       assert.equal(startResult.structuredContent!.run!.workingDirectoryForHarness, path.resolve(harnessDir));
     } finally {
       await runCli(["mcp", "stop"], cliEnv);
+      // run.start also brings up the dashboard daemon in this HOME; stop it
+      // too, or it outlives the test and keeps the temp DB locked (Windows).
+      await runCli(["dashboard", "stop"], cliEnv);
       fs.rmSync(tempEnv.root, { recursive: true, force: true });
     }
   });

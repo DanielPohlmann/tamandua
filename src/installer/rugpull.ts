@@ -98,6 +98,7 @@ export function detectRugpull(runId: string): RugpullResult {
         cwd: wt.worktree_origin_repository,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
       }).trim();
     } catch {
       return {
@@ -127,6 +128,7 @@ export function detectRugpull(runId: string): RugpullResult {
         cwd: repo,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
       }).trim();
     } catch {
       return {
