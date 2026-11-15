@@ -9,12 +9,12 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import net from "node:net";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MCP_PORT, MCP_ENDPOINT_PATH } from "./mcp-server.js";
 import { DEFAULT_CONTROL_PORT } from "./control-server.js";
+import { homeDir } from "../lib/home-dir.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -24,7 +24,7 @@ const START_LOCK_STALE_MS = 30_000;
 // ── MCP file paths ─────────────────────────────────────────────────
 
 function defaultTamanduaDir(): string {
-  return path.join(process.env.HOME?.trim() || os.homedir(), ".tamandua");
+  return path.join(homeDir(), ".tamandua");
 }
 
 export const MCP_PID_FILE = path.join(defaultTamanduaDir(), "mcp.pid");
@@ -154,7 +154,39 @@ function checkPidFile(pidFile: string): { running: true; pid: number } | { runni
   }
 }
 
+/** A process's command line on Windows, or null when it cannot be read. */
+function windowsCommandLine(pid: number): string | null {
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Math.trunc(pid)}").CommandLine`],
+    { encoding: "utf-8", windowsHide: true, timeout: 15_000 },
+  );
+  const out = (result.stdout ?? "").trim();
+  return result.status === 0 && out ? out : null;
+}
+
+/**
+ * Windows has no /proc/<pid>/environ, so match the process instead by what
+ * daemonctl launched: one of tamandua's server scripts, listening on a port
+ * recorded in this home's port files.
+ */
+function windowsProcessBelongsToHome(pid: number, homeDir: string): boolean {
+  const cmd = windowsCommandLine(pid);
+  if (!cmd) return false;
+  const match = /dist[\\/]server[\\/](?:daemon|mcp-standalone|control-standalone)\.js"?\s+(\d+)\s*$/.exec(cmd);
+  if (!match) return false;
+  const dir = path.join(homeDir, ".tamandua");
+  return ["port", "mcp-port", "control-plane-port"].some((name) => {
+    try {
+      return fs.readFileSync(path.join(dir, name), "utf-8").trim() === match[1];
+    } catch {
+      return false;
+    }
+  });
+}
+
 function processHomeMatches(pid: number, homeDir: string): boolean {
+  if (process.platform === "win32") return windowsProcessBelongsToHome(pid, homeDir);
   try {
     const environ = fs.readFileSync(`/proc/${pid}/environ`);
     for (const entry of environ.toString("utf-8").split("\0")) {

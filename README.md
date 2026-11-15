@@ -654,6 +654,11 @@ npm test
 > `bin/tamandua` wrapper spawn, POSIX-only path expectations (`/tmp` vs
 > `C:\tmp`), and missing harness binaries. On such machines a raw pass/fail
 > count is **not** a reliable regression signal.
+>
+> **Windows notes.** Tamandua resolves `~` from `HOME` when it is set (falling
+> back to `USERPROFILE`), so tests isolated by `HOME` no longer touch your real
+> `~/.tamandua`. `.sh` scripts (AutoResearch, bash steps) run through Git Bash;
+> set `TAMANDUA_BASH` if it is not on `PATH` or in `C:\Program Files\Git`.
 
 **How to judge a change on a machine with pre-existing failures:**
 

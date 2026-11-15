@@ -2,6 +2,8 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parsePiOutputStream } from "../installer/pi-stream-parser.js";
+import { killProcessTree, reapOrphanedDescendants } from "../installer/bash-step.js";
+import { windowsShellCommand } from "../lib/posix-shell.js";
 
 export type AutoresearchDirection = "lower" | "higher";
 export type AutoresearchDecision = "baseline" | "keep" | "discard" | "crash" | "checks_failed";
@@ -213,7 +215,7 @@ export function isAutoresearchProtectedFile(file: string): boolean {
 }
 
 export function hasDirtyNonAutoresearchFiles(cwd = process.cwd()): { dirty: boolean; dirtyFiles: string[] } {
-  const status = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf-8" });
+  const status = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf-8", windowsHide: true });
   if (status.status !== 0) {
     // Not a git repo — no dirty files
     if (status.stderr?.includes("not a git repository")) return { dirty: false, dirtyFiles: [] };
@@ -676,11 +678,13 @@ function nextRunNumber(entries: AutoresearchLogEntry[]): number {
 function runCommand(command: string, cwd: string, timeoutMs: number): Promise<CommandResult> {
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn(command, {
+    const child = spawn(windowsShellCommand(command), {
       cwd,
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
+      detached: process.platform !== "win32",
+      windowsHide: true,
     });
 
     let stdout = "";
@@ -688,13 +692,16 @@ function runCommand(command: string, cwd: string, timeoutMs: number): Promise<Co
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      // Kill the whole tree: SIGTERM on a shell leaves its children running.
+      if (child.pid) killProcessTree(child.pid, "SIGKILL");
+      else child.kill("SIGKILL");
     }, timeoutMs);
 
     child.stdout?.on("data", (chunk) => { stdout += chunk.toString("utf-8"); });
     child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf-8"); });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      reapOrphanedDescendants(child.pid, started);
       resolve({ exitCode: timedOut ? null : code, stdout, stderr, durationMs: Date.now() - started, timedOut });
     });
     child.on("error", (err) => {
@@ -744,12 +751,12 @@ function calculateImprovementRatio(baseline: number | null, metric: number | nul
 }
 
 function readGitHead(cwd: string): string | undefined {
-  const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf-8" });
+  const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf-8", windowsHide: true });
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
 export function commitAutoresearchResult(cwd: string, run: number, description: string): string | undefined {
-  const add = spawnSync("git", ["add", "-A"], { cwd, encoding: "utf-8" });
+  const add = spawnSync("git", ["add", "-A"], { cwd, encoding: "utf-8", windowsHide: true });
   if (add.status !== 0) {
     // Not a git repo — skip commit
     if (add.stderr?.includes("not a git repository")) return undefined;
@@ -757,10 +764,10 @@ export function commitAutoresearchResult(cwd: string, run: number, description: 
   }
   // Unstage protected AutoResearch files so they are never committed
   const protectedResetPaths = [...PROTECTED_AUTORESEARCH_FILE_NAMES, "autoresearch.hooks"];
-  const reset = spawnSync("git", ["reset", "--", ...protectedResetPaths], { cwd, encoding: "utf-8" });
+  const reset = spawnSync("git", ["reset", "--", ...protectedResetPaths], { cwd, encoding: "utf-8", windowsHide: true });
   if (reset.status !== 0) throw new Error(`git reset (autoresearch files) failed: ${reset.stderr}`);
   const message = `autoresearch: keep run ${run}\n\n${description}`;
-  const commit = spawnSync("git", ["commit", "-m", message], { cwd, encoding: "utf-8" });
+  const commit = spawnSync("git", ["commit", "-m", message], { cwd, encoding: "utf-8", windowsHide: true });
   if (commit.status !== 0) {
     const err = `${commit.stderr ?? ""}${commit.stdout ?? ""}`;
     // No non-autoresearch changes to commit — this is not an error
@@ -771,7 +778,7 @@ export function commitAutoresearchResult(cwd: string, run: number, description: 
 }
 
 function revertExperimentChanges(cwd: string): void {
-  const status = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf-8" });
+  const status = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf-8", windowsHide: true });
   if (status.status !== 0) {
     // Not a git repo — nothing to revert
     if (status.stderr?.includes("not a git repository")) return;
@@ -789,11 +796,11 @@ function revertExperimentChanges(cwd: string): void {
     else trackedPaths.push(file);
   }
   if (trackedPaths.length > 0) {
-    const restore = spawnSync("git", ["restore", "--staged", "--worktree", "--", ...trackedPaths], { cwd, encoding: "utf-8" });
+    const restore = spawnSync("git", ["restore", "--staged", "--worktree", "--", ...trackedPaths], { cwd, encoding: "utf-8", windowsHide: true });
     if (restore.status !== 0) throw new Error(`git restore failed: ${restore.stderr}`);
   }
   if (untrackedPaths.length > 0) {
-    const clean = spawnSync("git", ["clean", "-fd", "--", ...untrackedPaths], { cwd, encoding: "utf-8" });
+    const clean = spawnSync("git", ["clean", "-fd", "--", ...untrackedPaths], { cwd, encoding: "utf-8", windowsHide: true });
     if (clean.status !== 0) throw new Error(`git clean failed: ${clean.stderr}`);
   }
 }
@@ -889,7 +896,7 @@ async function runHook(paths: AutoresearchPaths, name: "before" | "after", paylo
   const stat = fs.statSync(hookPath);
   if ((stat.mode & 0o111) === 0) return;
   await new Promise<void>((resolve) => {
-    const child = spawn(hookPath, { cwd: paths.cwd, stdio: ["pipe", "ignore", "ignore"] });
+    const child = spawn(hookPath, { cwd: paths.cwd, stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
     const timeout = setTimeout(() => child.kill("SIGTERM"), 30_000);
     child.stdin?.end(JSON.stringify(payload) + "\n");
     child.on("close", () => { clearTimeout(timeout); resolve(); });
@@ -916,17 +923,22 @@ async function runPiAgent(cwd: string, prompt: string, timeoutMs = 300_000): Pro
   return new Promise((resolve) => {
     const piCmd = "pi";
     const args = ["--print", "--no-session", "--mode", "json", prompt];
+    const started = Date.now();
     const child = spawn(piCmd, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      windowsHide: true,
     });
+    let exited = false;
     let stdout = "";
     let stderr = "";
     let settled = false;
     const settle = (result: { success: boolean; stdout: string; stderr: string; hypothesis?: string; learned?: string; nextFocus?: string }) => {
       if (settled) return;
       settled = true;
-      child.kill("SIGTERM");
+      // On timeout pi is still running: kill its whole tree, not just pi.
+      if (!exited && child.pid) killProcessTree(child.pid, "SIGKILL");
       resolve(result);
     };
     const timer = setTimeout(() => {
@@ -935,7 +947,9 @@ async function runPiAgent(cwd: string, prompt: string, timeoutMs = 300_000): Pro
     child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
     child.on("close", async (code) => {
+      exited = true;
       clearTimeout(timer);
+      reapOrphanedDescendants(child.pid, started);
       const lines = stdout.split(/\r?\n/);
       const parsedStream = await parsePiOutputStream(lines);
       const assistantText = parsedStream.assistantText || (parsedStream.textFallback ?? "");

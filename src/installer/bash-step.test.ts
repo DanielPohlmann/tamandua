@@ -12,7 +12,10 @@ import {
   recoverStaleBashSteps,
   bashRunnerAgent,
   BASH_RUNNER_TIMEOUT_SECONDS,
+  buildOrphanReapScript,
+  reapOrphanedDescendants,
 } from "../../dist/installer/bash-step.js";
+import { spawn } from "node:child_process";
 import { executePollingRound } from "../../dist/installer/agent-scheduler.js";
 import { useTempTamanduaHome, seedRun, type TempTamanduaHome } from "../../tests/helpers/temp-db.ts";
 
@@ -350,5 +353,46 @@ describe("bash step recovery after a daemon crash", () => {
       },
     });
     assert.equal(unitStep().claim_pgid, 4242);
+  });
+});
+
+describe("reapOrphanedDescendants", () => {
+  it("builds a script scoped to the root pid and start time", () => {
+    const script = buildOrphanReapScript(1234, 1700000000000);
+    assert.ok(script.includes("$root = 1234;"));
+    assert.ok(script.includes("$since = 1700000000000;"));
+    assert.ok(script.includes("Stop-Process -Id $id -Force"));
+  });
+
+  it("is a no-op without a pid", () => {
+    reapOrphanedDescendants(undefined, Date.now());
+  });
+
+  it("kills a grandchild left running after its parent exited", { skip: process.platform !== "win32", timeout: 60_000 }, async () => {
+    const startedAt = Date.now() - 1000;
+    // The parent starts a long-running grandchild, prints its pid and exits.
+    // detached keeps the grandchild out of libuv's kill-on-close job object,
+    // like a background process that escaped its agent.
+    const parentCode = [
+      "const { spawn } = require('node:child_process');",
+      "const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true, detached: true });",
+      "console.log(c.pid); c.unref();",
+    ].join(" ");
+    const parent = spawn(process.execPath, ["-e", parentCode], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    let out = "";
+    parent.stdout.on("data", (chunk: Buffer) => { out += chunk.toString(); });
+    await new Promise<void>((resolve) => parent.on("close", () => resolve()));
+    const grandchild = Number(out.trim());
+    assert.ok(grandchild > 0, `expected grandchild pid, got ${JSON.stringify(out)}`);
+    const alive = () => { try { process.kill(grandchild, 0); return true; } catch { return false; } };
+    try {
+      assert.equal(alive(), true, "grandchild should outlive its parent");
+      reapOrphanedDescendants(parent.pid, startedAt);
+      const deadline = Date.now() + 45_000;
+      while (alive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+      assert.equal(alive(), false, "grandchild should be reaped");
+    } finally {
+      if (alive()) process.kill(grandchild);
+    }
   });
 });

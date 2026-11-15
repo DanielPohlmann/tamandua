@@ -5,7 +5,7 @@ import path from "node:path";
 import { resolveTamanduaCliCommand, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
 import { BASH_RUNNER_AGENT_ID } from "./types.js";
-import { executeBashRound, killProcessTree, recoverStaleBashSteps, schedulableAgents } from "./bash-step.js";
+import { executeBashRound, killProcessTree, reapOrphanedDescendants, recoverStaleBashSteps, schedulableAgents } from "./bash-step.js";
 import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
@@ -346,7 +346,10 @@ export async function runPi(
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-    detached: true,
+    // On Windows `detached` means DETACHED_PROCESS: the agent gets no console,
+    // so every console tool it runs (node, bash, git, npm) opens a visible
+    // window. Tree kills there go through taskkill /T, which needs no group.
+    detached: process.platform !== "win32",
   });
 
   const childPid = child.pid;
@@ -409,6 +412,8 @@ export async function runPi(
       reject(err);
     });
     child.on("close", (code, signal) => {
+      // Kill what the agent left running (Windows only; see reapOrphanedDescendants).
+      reapOrphanedDescendants(childPid, startedAt);
       clearTimeout(timer);
       if (settled) return;
       settled = true;
@@ -524,7 +529,10 @@ export async function runHermes(
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-    detached: true,
+    // On Windows `detached` means DETACHED_PROCESS: the agent gets no console,
+    // so every console tool it runs (node, bash, git, npm) opens a visible
+    // window. Tree kills there go through taskkill /T, which needs no group.
+    detached: process.platform !== "win32",
   });
 
   const childPid = child.pid;
@@ -594,6 +602,8 @@ export async function runHermes(
       reject(err);
     });
     child.on("close", (code, signal) => {
+      // Kill what the agent left running (Windows only; see reapOrphanedDescendants).
+      reapOrphanedDescendants(childPid, startedAt);
       clearTimeout(timer);
       if (settled) return;
       settled = true;
@@ -720,7 +730,10 @@ export async function runClaude(
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-    detached: true,
+    // On Windows `detached` means DETACHED_PROCESS: the agent gets no console,
+    // so every console tool it runs (node, bash, git, npm) opens a visible
+    // window. Tree kills there go through taskkill /T, which needs no group.
+    detached: process.platform !== "win32",
   });
 
   const childPid = child.pid;
@@ -787,6 +800,8 @@ export async function runClaude(
       reject(err);
     });
     child.on("close", (code, signal) => {
+      // Kill what the agent left running (Windows only; see reapOrphanedDescendants).
+      reapOrphanedDescendants(childPid, startedAt);
       clearTimeout(timer);
       if (settled) return;
       settled = true;

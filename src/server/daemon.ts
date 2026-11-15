@@ -17,7 +17,6 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { createDashboardServer } from "./dashboard.js";
 import {
   DEFAULT_MCP_PORT,
@@ -33,9 +32,10 @@ import {
 } from "./control-server.js";
 import { shutdownAllCrons } from "../installer/agent-scheduler.js";
 import { runVersionCheck } from "../lib/version-check.js";
+import { homeDir } from "../lib/home-dir.js";
 
-const PID_FILE = path.join(os.homedir(), ".tamandua", "tamandua.pid");
-const PORT_FILE = path.join(os.homedir(), ".tamandua", "port");
+const PID_FILE = path.join(homeDir(), ".tamandua", "tamandua.pid");
+const PORT_FILE = path.join(homeDir(), ".tamandua", "port");
 
 interface DaemonArgs {
   withMcp: boolean;

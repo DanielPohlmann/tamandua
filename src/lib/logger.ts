@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { homeDir } from "./home-dir.js";
 
 const MAX_LOG_SIZE = 5 * 1024 * 1024; // 5MB
 
 function getLogDir(): string {
   const stateDir = process.env.TAMANDUA_STATE_DIR?.trim();
-  return stateDir ? path.resolve(stateDir) : path.join(os.homedir(), ".tamandua");
+  return stateDir ? path.resolve(stateDir) : path.join(homeDir(), ".tamandua");
 }
 
 function getLogFile(): string {
