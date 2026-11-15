@@ -14,6 +14,9 @@ import {
   BASH_RUNNER_TIMEOUT_SECONDS,
   buildOrphanReapScript,
   reapOrphanedDescendants,
+  trackDescendants,
+  collectDescendants,
+  parseProcessSamples,
 } from "../../dist/installer/bash-step.js";
 import { spawn } from "node:child_process";
 import { executePollingRound } from "../../dist/installer/agent-scheduler.js";
@@ -393,6 +396,77 @@ describe("reapOrphanedDescendants", () => {
       assert.equal(alive(), false, "grandchild should be reaped");
     } finally {
       if (alive()) process.kill(grandchild);
+    }
+  });
+});
+
+describe("descendant tracking", () => {
+  it("parses sampler lines and skips junk", () => {
+    assert.deepEqual(parseProcessSamples("10 4 1000\r\n\r\nnot a line\n11 10 2000\n"), [
+      { pid: 10, parentPid: 4, createdMs: 1000 },
+      { pid: 11, parentPid: 10, createdMs: 2000 },
+    ]);
+  });
+
+  it("walks from the root and ignores processes older than the root", () => {
+    const snapshot = [
+      { pid: 1, parentPid: 0, createdMs: 100 },
+      { pid: 2, parentPid: 1, createdMs: 200 },
+      { pid: 3, parentPid: 2, createdMs: 300 },
+      { pid: 4, parentPid: 1, createdMs: 50 },
+    ];
+    assert.deepEqual([...collectDescendants(snapshot, 1, 100).keys()].sort(), [2, 3]);
+  });
+
+  it("keeps a known descendant whose parent has exited, but only with a matching creation time", () => {
+    // pid 3's parent (2) is gone; 3 is still found through the known map.
+    const snapshot = [{ pid: 3, parentPid: 2, createdMs: 300 }, { pid: 5, parentPid: 3, createdMs: 400 }];
+    assert.deepEqual([...collectDescendants(snapshot, 1, 100, new Map([[3, 300]])).keys()].sort(), [3, 5]);
+    // Same pid, different creation time: a reused pid, not ours.
+    assert.equal(collectDescendants(snapshot, 1, 100, new Map([[3, 9_000]])).size, 0);
+  });
+
+  it("puts known descendants into the reap script", () => {
+    const script = buildOrphanReapScript(7, 1000, new Map([[42, 1234]]));
+    assert.ok(script.includes("$known = @{ 42 = 1234 }"));
+  });
+
+  it("reaps a descendant whose intermediate parent exited before the agent did", { skip: process.platform !== "win32", timeout: 90_000 }, async () => {
+    // Shape of `claude -> cmd /c npx -> node`: the middle process exits first,
+    // so a walk from the root at reap time can no longer reach the leaf.
+    const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tamandua-track-")), "leaf.pid");
+    const leafCode = "setInterval(() => {}, 1000)";
+    const middleCode = [
+      "const { spawn } = require('node:child_process'); const fs = require('node:fs');",
+      `const b = spawn(process.execPath, ['-e', ${JSON.stringify(leafCode)}], { stdio: 'ignore', windowsHide: true, detached: true });`,
+      `fs.writeFileSync(${JSON.stringify(pidFile)}, String(b.pid)); b.unref();`,
+      "setTimeout(() => process.exit(0), 12000);",
+    ].join(" ");
+    const rootCode = [
+      "const { spawn } = require('node:child_process');",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(middleCode)}], { stdio: 'ignore', windowsHide: true, detached: true }).unref();`,
+      "setInterval(() => {}, 1000);",
+    ].join(" ");
+    const startedAt = Date.now() - 1000;
+    const root = spawn(process.execPath, ["-e", rootCode], { stdio: "ignore", windowsHide: true });
+    trackDescendants(root.pid, startedAt);
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let leaf = 0;
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    try {
+      for (let i = 0; i < 40 && !leaf; i++) { await sleep(250); try { leaf = Number(fs.readFileSync(pidFile, "utf-8")); } catch {} }
+      assert.ok(leaf > 0, "leaf pid file should be written");
+      await sleep(14_000); // first sample at ~8s, middle exits at ~12s
+      root.kill();
+      await new Promise<void>((r) => root.on("exit", () => r()));
+      assert.equal(alive(leaf), true, "leaf should outlive root and middle");
+      reapOrphanedDescendants(root.pid, startedAt);
+      const deadline = Date.now() + 45_000;
+      while (alive(leaf) && Date.now() < deadline) await sleep(250);
+      assert.equal(alive(leaf), false, "leaf should be reaped through the recorded descendants");
+    } finally {
+      if (leaf && alive(leaf)) process.kill(leaf);
+      if (alive(root.pid!)) root.kill();
     }
   });
 });

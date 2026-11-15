@@ -5,7 +5,7 @@ import path from "node:path";
 import { resolveTamanduaCliCommand, resolveWorkflowDir, resolveWorkflowWorkspaceDir } from "./paths.js";
 import type { WorkflowSpec, WorkflowAgent, HarnessType } from "./types.js";
 import { BASH_RUNNER_AGENT_ID } from "./types.js";
-import { executeBashRound, killProcessTree, reapOrphanedDescendants, recoverStaleBashSteps, schedulableAgents } from "./bash-step.js";
+import { executeBashRound, killProcessTree, reapOrphanedDescendants, recoverStaleBashSteps, schedulableAgents, trackDescendants } from "./bash-step.js";
 import { logger } from "../lib/logger.js";
 import { getRoleTimeoutSeconds, inferRole } from "./install.js";
 import { formatPiCommandPreview } from "./pi-command-preview.js";
@@ -353,6 +353,7 @@ export async function runPi(
   });
 
   const childPid = child.pid;
+  trackDescendants(childPid, startedAt);
   // On Linux, the spawned child becomes its own group leader (pgid === pid)
   // when detached:true. Fall back to childPid if getpgid is unavailable.
   const pgid = childPid ?? 0;
@@ -536,6 +537,7 @@ export async function runHermes(
   });
 
   const childPid = child.pid;
+  trackDescendants(childPid, startedAt);
   const pgid = childPid ?? 0;
 
   if (childPid && options.onSpawn) {
@@ -737,6 +739,7 @@ export async function runClaude(
   });
 
   const childPid = child.pid;
+  trackDescendants(childPid, startedAt);
   const pgid = childPid ?? 0;
 
   if (childPid && options.onSpawn) {

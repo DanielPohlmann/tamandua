@@ -93,27 +93,154 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals = "SIGKILL")
  * after the root started are followed, so a PID reused by an unrelated older
  * process never matches.
  */
-export function buildOrphanReapScript(rootPid: number, startedAtMs: number): string {
+export function buildOrphanReapScript(
+  rootPid: number,
+  startedAtMs: number,
+  known: ReadonlyMap<number, number> = new Map(),
+): string {
+  // Descendants recorded while the root was alive. They are seeds even when the
+  // process between them and the root has exited (e.g. `cmd /c npx` dies and
+  // leaves npx's node running), but only if PID and creation time still match.
+  const knownEntries = [...known].map(([pid, ms]) => `${Math.trunc(pid)} = ${Math.trunc(ms)}`).join("; ");
   return [
-    `$root = ${Math.trunc(rootPid)}; $since = ${Math.trunc(startedAtMs)}; $self = $PID`,
-    "$all = @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -and ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() -ge $since })",
-    "$set = @{ $root = $true }; $hits = @(); $grew = $true",
-    "while ($grew) { $grew = $false; foreach ($p in $all) { if ($set.ContainsKey([int]$p.ParentProcessId) -and -not $set.ContainsKey([int]$p.ProcessId) -and $p.ProcessId -ne $self) { $set[[int]$p.ProcessId] = $true; $hits += [int]$p.ProcessId; $grew = $true } } }",
+    `$root = ${Math.trunc(rootPid)}; $since = ${Math.trunc(startedAtMs)}; $self = $PID; $known = @{ ${knownEntries} }`,
+    "$all = @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate } | ForEach-Object { [pscustomobject]@{ Id = [int]$_.ProcessId; Parent = [int]$_.ParentProcessId; Ms = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() } } | Where-Object { $_.Ms -ge $since })",
+    "$set = @{ $root = $true }; $hits = @()",
+    "foreach ($p in $all) { if ($known.ContainsKey($p.Id) -and [math]::Abs($known[$p.Id] - $p.Ms) -lt 1000 -and $p.Id -ne $self) { $set[$p.Id] = $true; $hits += $p.Id } }",
+    "$grew = $true",
+    "while ($grew) { $grew = $false; foreach ($p in $all) { if ($set.ContainsKey($p.Parent) -and -not $set.ContainsKey($p.Id) -and $p.Id -ne $self) { $set[$p.Id] = $true; $hits += $p.Id; $grew = $true } } }",
     "foreach ($id in $hits) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }",
   ].join("; ");
 }
 
+export interface ProcessSample {
+  pid: number;
+  parentPid: number;
+  createdMs: number;
+}
+
+/**
+ * Descendants of `rootPid` in a process snapshot, following only processes
+ * created at or after `sinceMs` (older ones cannot be the root's children, so a
+ * reused PID never matches). Already-known descendants are also walked from,
+ * which keeps the chain when an intermediate process has exited.
+ */
+export function collectDescendants(
+  snapshot: readonly ProcessSample[],
+  rootPid: number,
+  sinceMs: number,
+  known: ReadonlyMap<number, number> = new Map(),
+): Map<number, number> {
+  const fresh = snapshot.filter((p) => p.createdMs >= sinceMs);
+  const found = new Map<number, number>();
+  const set = new Set<number>([rootPid]);
+  for (const p of fresh) {
+    const ms = known.get(p.pid);
+    if (ms !== undefined && Math.abs(ms - p.createdMs) < 1000) {
+      set.add(p.pid);
+      found.set(p.pid, p.createdMs);
+    }
+  }
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const p of fresh) {
+      if (set.has(p.parentPid) && !set.has(p.pid)) {
+        set.add(p.pid);
+        found.set(p.pid, p.createdMs);
+        grew = true;
+      }
+    }
+  }
+  return found;
+}
+
+/** Parses `pid parentPid createdMs` lines from the sampler script. */
+export function parseProcessSamples(text: string): ProcessSample[] {
+  const samples: ProcessSample[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const [pid, parentPid, createdMs] = line.trim().split(/\s+/).map(Number);
+    if (Number.isInteger(pid) && Number.isInteger(parentPid) && Number.isFinite(createdMs)) {
+      samples.push({ pid, parentPid, createdMs });
+    }
+  }
+  return samples;
+}
+
+const SAMPLE_SCRIPT =
+  "Get-CimInstance Win32_Process | Where-Object { $_.CreationDate } | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }";
+const SAMPLE_INTERVAL_MS = 15_000;
+const FIRST_SAMPLE_DELAY_MS = 8_000;
+
+/** Root pid → start time and the descendants seen so far (pid → creation ms). */
+const trackedRoots = new Map<number, { startedAtMs: number; seen: Map<number, number> }>();
+let samplerTimer: NodeJS.Timeout | undefined;
+let sampling = false;
+
+function sampleTrackedRoots(): void {
+  if (sampling || trackedRoots.size === 0) return;
+  sampling = true;
+  let out = "";
+  try {
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", SAMPLE_SCRIPT], {
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString("utf-8"); });
+    child.on("error", () => { sampling = false; });
+    child.on("close", () => {
+      sampling = false;
+      const snapshot = parseProcessSamples(out);
+      for (const [root, entry] of trackedRoots) {
+        for (const [pid, ms] of collectDescendants(snapshot, root, entry.startedAtMs, entry.seen)) {
+          entry.seen.set(pid, ms);
+        }
+      }
+    });
+  } catch {
+    sampling = false;
+  }
+}
+
+/**
+ * Windows only: start recording the descendants of a running agent so
+ * reapOrphanedDescendants can still find them after the process between them
+ * and the agent has exited. One sampler serves every tracked agent and stops
+ * when none is left. No-op on POSIX.
+ */
+export function trackDescendants(rootPid: number | undefined, startedAtMs: number): void {
+  if (process.platform !== "win32" || !rootPid) return;
+  trackedRoots.set(rootPid, { startedAtMs, seen: new Map() });
+  setTimeout(sampleTrackedRoots, FIRST_SAMPLE_DELAY_MS).unref();
+  if (!samplerTimer) {
+    samplerTimer = setInterval(sampleTrackedRoots, SAMPLE_INTERVAL_MS);
+    samplerTimer.unref();
+  }
+}
+
+function untrack(rootPid: number): Map<number, number> {
+  const seen = trackedRoots.get(rootPid)?.seen ?? new Map<number, number>();
+  trackedRoots.delete(rootPid);
+  if (trackedRoots.size === 0 && samplerTimer) {
+    clearInterval(samplerTimer);
+    samplerTimer = undefined;
+  }
+  return seen;
+}
+
 /**
  * Windows only: kill the descendants a process left running after it exited
- * (dev servers, watchers, background shells), which otherwise keep their
- * consoles open and burn CPU. Fire-and-forget; no-op on POSIX.
+ * (dev servers, watchers, MCP servers behind `cmd /c npx`), which otherwise
+ * keep running and burn CPU. Uses what trackDescendants recorded plus a fresh
+ * walk from the root. Fire-and-forget; no-op on POSIX.
  */
 export function reapOrphanedDescendants(rootPid: number | undefined, startedAtMs: number): void {
   if (process.platform !== "win32" || !rootPid) return;
+  const known = untrack(rootPid);
   try {
     const reaper = spawn(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", buildOrphanReapScript(rootPid, startedAtMs)],
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", buildOrphanReapScript(rootPid, startedAtMs, known)],
       { stdio: "ignore", windowsHide: true },
     );
     reaper.on("error", () => {});

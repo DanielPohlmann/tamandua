@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parsePiOutputStream } from "../installer/pi-stream-parser.js";
-import { killProcessTree, reapOrphanedDescendants } from "../installer/bash-step.js";
+import { killProcessTree, reapOrphanedDescendants, trackDescendants } from "../installer/bash-step.js";
 import { windowsShellCommand } from "../lib/posix-shell.js";
 
 export type AutoresearchDirection = "lower" | "higher";
@@ -686,6 +686,7 @@ function runCommand(command: string, cwd: string, timeoutMs: number): Promise<Co
       detached: process.platform !== "win32",
       windowsHide: true,
     });
+    trackDescendants(child.pid, started);
 
     let stdout = "";
     let stderr = "";
@@ -930,6 +931,7 @@ async function runPiAgent(cwd: string, prompt: string, timeoutMs = 300_000): Pro
       detached: process.platform !== "win32",
       windowsHide: true,
     });
+    trackDescendants(child.pid, started);
     let exited = false;
     let stdout = "";
     let stderr = "";
