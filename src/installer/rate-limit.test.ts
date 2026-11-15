@@ -239,8 +239,12 @@ describe("executePollingRound on a usage limit", { skip: process.platform === "w
     const bin = path.join(home.dir, "claude");
     fs.writeFileSync(bin, "#!/bin/sh\necho 'Claude usage limit reached. Your limit will reset at 3:00 PM' >&2\nexit 1\n", { mode: 0o755 });
     process.env.TAMANDUA_CLAUDE_BINARY = bin;
+    // s-review stands for the step the agent claimed in this launch before the
+    // limit hit. s-next keeps pending work for the agent, so the scheduler's
+    // pre-launch peek starts the harness at all.
     seedRun(getDb(), { id: "run-1", context: { harness_type: "claude" } }, [
       { id: "s-review", stepId: "gate-review", index: 0, status: "running", agentId: "wf_reviewer" },
+      { id: "s-next", stepId: "gate-next", index: 1, status: "pending", agentId: "wf_reviewer" },
     ]);
     getDb().prepare("UPDATE steps SET claim_job_id = 'job-1' WHERE id = 's-review'").run();
   });

@@ -45,6 +45,7 @@ import { readVersionStatus } from "../lib/version-check.js";
 import { getBuildVersion } from "../lib/version.js";
 import { parseWorkflowRunArgs } from "./workflow-run-args.js";
 import type { HarnessType } from "../installer/types.js";
+import { BASH_RUNNER_AGENT_ID } from "../installer/types.js";
 import {
   findAutoresearchSessionCwd,
   initExperiment,
@@ -2829,7 +2830,9 @@ async function main() {
       console.log(`Steps:`);
       for (const step of result.steps) {
         const icon = step.status === "done" ? "  [done   ]" : step.status === "running" ? "  [running]" : step.status === "failed" ? "  [failed ]" : step.status === "pending" ? "  [pending]" : `  [${step.status.padEnd(7)}]`;
-        console.log(`${icon} ${step.stepId} (${step.agentId.split("_").slice(-1)[0]})`);
+        const agent = step.agentId.split("_").slice(-1)[0];
+        // Bash steps share the synthetic bash-runner agent; the step id already names the gate.
+        console.log(`${icon} ${step.stepId} (${agent === BASH_RUNNER_AGENT_ID ? "bash" : agent})`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : `No run found matching "${target}".`;

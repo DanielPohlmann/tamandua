@@ -20,6 +20,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import type { TamanduaEvent } from "../installer/events.js";
+import { BASH_RUNNER_AGENT_ID } from "../installer/types.js";
 
 export type VisualStatus = "todo" | "running" | "done" | "failed";
 
@@ -161,6 +162,16 @@ export function normaliseStatus(raw: string | null | undefined): VisualStatus {
 export function laneAgentSuffix(agentId: string): string {
   const idx = agentId.lastIndexOf("_");
   return idx >= 0 ? agentId.slice(idx + 1) : agentId;
+}
+
+/**
+ * What a step is called on the board: its agent, except for bash steps, which
+ * all share the synthetic bash-runner agent and are named after the step
+ * (gate-unit, gate-ci-local, ...) instead.
+ */
+export function stepDisplayName(agentId: string, stepId: string): string {
+  const agent = laneAgentSuffix(agentId);
+  return agent === BASH_RUNNER_AGENT_ID ? stepId : agent;
 }
 
 function humanLabel(agent: string): string {
@@ -347,7 +358,7 @@ export function buildKanbanCardDetail(
   return {
     runId,
     cardId,
-    title: `${step.agent_id.split("_").pop() ?? step.agent_id} step`,
+    title: laneAgentSuffix(step.agent_id) === BASH_RUNNER_AGENT_ID ? step.step_id : `${laneAgentSuffix(step.agent_id)} step`,
     status: step.status,
     input_template: step.input_template ?? "",
     output: step.output ?? undefined,
@@ -424,7 +435,8 @@ export function buildKanbanSnapshot(
 
   const lanes: KanbanLane[] = steps.map((step) => {
     const agent = laneAgentSuffix(step.agent_id);
-    const label = humanLabel(agent);
+    const isBash = agent === BASH_RUNNER_AGENT_ID;
+    const label = humanLabel(stepDisplayName(step.agent_id, step.step_id));
     let cards: KanbanCard[];
     if (step.type === "loop") {
       cards = stories.map((story) => {
@@ -449,7 +461,7 @@ export function buildKanbanSnapshot(
     } else {
       cards = [{
         id: step.step_id,
-        title: `${label} step`,
+        title: isBash ? label : `${label} step`,
         status: normaliseStatus(step.status),
         sub: stepCardSub(step),
       }];
